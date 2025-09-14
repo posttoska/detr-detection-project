@@ -1,5 +1,5 @@
 import torch
-import math 
+import math
 import torch.nn as nn
 import torchvision.models
 from torch.nn import functional as F
@@ -17,8 +17,9 @@ class MultiHeadAttention(nn.Module):
         self.in_proj = nn.Linear(d_model, 3 * d_model)
         self.out_proj = nn.Linear(d_model, d_model)
         self.d_head = d_model // num_heads
-        
-    def forward(self, x):
+    
+    # q parameter is for cross attn
+    def forward(self, x, q_cross=nn.Linear(0.0, 0.0), isCrossAtt=False):
         # x: (batch, sequence, d_model)
         input_shape = x.shape
         batch, seq_len, d_model = input_shape
@@ -29,6 +30,13 @@ class MultiHeadAttention(nn.Module):
         
         # 3 * (b, seq_len, d_model)
         q, k, v = x.chunk(3, dim=-1)
+
+        # cross attention use case
+        if isCrossAtt:
+            q = q_cross
+            is_dim = (q_cross.shape == k.shape) and (q_cross.shape == v.shape)
+            assert is_dim, "cross q must be the same dim as k and v"
+
 
         # d_model/num_heads = d_heads
         # (b, num_heads, seq_len, d_heads)
@@ -57,8 +65,6 @@ class MultiHeadAttention(nn.Module):
         return out
 
 
-
-
 class TransformerEncoder(nn.Module):
     r"""
     Encoder for transformer of DETR.
@@ -77,6 +83,92 @@ class TransformerEncoder(nn.Module):
         # self attention module for all encoder layers
         self.attns = nn.ModuleList([MultiHeadAttention(d_model, num_heads) for _ in range(num_layers)])
 
+        # MLP module for all encoder layers
+        self.ffs = nn.ModuleList(
+            [
+                nn.Sequential(
+                    # (b, seq_len, d_model)
+                    nn.Linear(d_model, ff_inner_dim),
+                    nn.ReLU(),
+                    # (b, seq_len, d_model)
+                    nn.Linear(ff_inner_dim, d_model),
+                ) 
+                for _ in range(num_layers)
+            ])
+
+        # norm for MHSA for all encoder layers
+        self.attn_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(num_layers)])
+        
+        # norm for MLP for all encoder layers
+        self.ff_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(num_layers)])
+
+        # dropout for self attention for all encoder layers
+        self.attn_dropouts = nn.Module(nn.Dropout(self.dropout_prob) for _ in range(num_layers))
+        
+        # dropout for feed forward for all encoder layers
+        self.ff_dropouts = nn.Module(nn.Dropout(self.dropout_prob for _ in range(num_layers)))
+
+        # norm for encoder output for all encoder outputs
+        self.output_norm = nn.LayerNorm(d_model)
+
+
+class TransformerDecoder(nn.Module):
+    r"""
+    Decoder for transformer of DETR.
+    This has sequence of decoder layers.
+    Each layer has the following modules.
+        1. LayerNorm for Self Attention.
+        2. Self Attention.
+        3. LayerNorm for Cross Attention on encoder outputs.
+        4. Cross Attention.
+        5. LayerNorm for MLP.
+        6. MLP.
+    """
+    def __init__(self, num_layers, num_heads, d_model, ff_inner_dim, dropout_prob=0.0):
+        super().__init__()
+        self.num_layers = num_layers
+        self.dropout_prob = dropout_prob
+
+        # self attention module for all decoder layers
+        self.attns = nn.ModuleList([MultiHeadAttention(d_model, num_heads) for _ in range(num_layers)])
+
+        # cross attention module for all decoder layers
+        self.cross_attns = nn.ModuleList([MultiHeadAttention(d_model, num_heads) for _ in range(num_layers)])
+
+        # MLP module for all decoder layers
+        self.ffs = nn.ModuleList(
+            [
+                nn.Sequential(
+                    # (b, seq_len, d_model)
+                    nn.Linear(d_model, ff_inner_dim),
+                    nn.ReLU(),
+                    # (b, seq_len, d_model)
+                    nn.Linear(ff_inner_dim, d_model),
+                ) 
+                for _ in range(num_layers)
+            ])
+        
+        # norm for MHSA for all decoder layers
+        self.attn_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(num_layers)])
+
+        # norm for MHCA for all decoder layers
+        self.cross_attn_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(num_layers)])
+
+        # norm for MLP for all decoder layers
+        self.ff_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(num_layers)])
+
+        # dropout for self attention for all decoder layers
+        self.attn_dropouts = nn.Module(nn.Dropout(self.dropout_prob) for _ in range(num_layers))
+        
+        # dropout for cross attention for all decoder layers
+        self.cross_attn_dropouts = nn.Module(nn.Dropout(self.dropout_prob) for _ in range(num_layers))
+        
+        # dropout for feed forward for all decoder layers
+        self.ff_dropouts = nn.Module(nn.Dropout(self.dropout_prob for _ in range(num_layers)))
+
+        # norm for decoder output for all decoder outputs
+        self.output_norm = nn.LayerNorm(d_model)
+
 
 class DETR(nn.Module):
     r"""
@@ -94,8 +186,10 @@ class DETR(nn.Module):
         self.d_model = config['d_model']
         self.num_queries = config['num_queries']
         self.num_classes = num_classes
+        self.num_encoder_layers = config['encoder_layers']
         self.num_decoder_layers = config['decoder_layers']
-        self.num_heads = config['num_heads']
+        self.num_encoder_heads = config['encoder_attn_heads']
+        self.num_decoder_heads = config['decoder_attn_heads']
         self.cls_cost_weight = config['cls_cost_weight']
         self.l1_cost_weight = config['l1_cost_weight']
         self.giou_cost_weight = config['giou_cost_weight']
@@ -118,5 +212,26 @@ class DETR(nn.Module):
         
         self.backbone_proj = nn.Conv2d(self.backbone_channels, self.d_model, kernel_size=1)
 
-        self.encoder = TransformerEncoder(self.num_layers, self.num_heads, self.d_model, self.ff_inner_dim, self.dropout_prob)
+        self.encoder = TransformerEncoder(num_layers=self.num_encoder_layers, 
+                                          num_heads=self.num_encoder_heads, 
+                                          d_model=self.d_model, 
+                                          ff_inner_dim=self.ff_inner_dim, 
+                                          dropout_prob=self.dropout_prob)
 
+        self.query_embed = nn.Parameter(torch.randn(self.num_queries, self.d_model))
+
+        self.encoder = TransformerDecoder(num_layers=self.num_decoder_layers, 
+                                          num_heads=self.num_decoder_heads, 
+                                          d_model=self.d_model,
+                                          ff_inner_dim=self.ff_inner_dim, 
+                                          dropout_prob=self.dropout_prob)
+        
+        self.class_mlp = nn.Linear(self.d_model, self.num_classes)
+
+        self.bbox_mlp = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model),
+            nn.ReLU(),
+            nn.Linear(self.d_model, self.d_model),
+            nn.ReLU(),
+            nn.Linear(self.d_model, out_features=4),
+        )
