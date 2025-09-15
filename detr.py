@@ -8,26 +8,86 @@ from scipy.optimize import linear_sum_assignment
 from collections import defaultdict
 
 
-class SinusoidalPositionEncoding(nn.Module):
-    def __init__(self, seq_length: int, embed_size: int):
-        super().__init__()
-        # create positional vector
-        position = torch.arange(seq_length).unsqueeze(1)
-        # create vector of frequencies for pos embedding
-        div_term = torch.exp(torch.arange(0, embed_size, 2) * (-math.log(10000.0) / embed_size))
-        # matrix for pos embbeding
-        pe = torch.zeros(seq_length, embed_size)
-        # fill matrix with freq
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        # save pos matrix to the buffer
-        self.register_buffer('positional_embedding', pe)
+def get_spatial_position_embeddings(embed_size: int, conv_out_tensor: torch.Tensor):
+    
+    # input: shape=(b, d_model, feat_h, feat_w)
+    assert embed_size % 4 == 0, ('Position embedding dimension must be divisible by 4')
+    
+    # get last 2 dims len (20 and 20)
+    grid_size_h, grid_size_w = conv_out_tensor.shape[-2], conv_out_tensor.shape[-1]
+    
+    # create tensors shape=(20)
+    # tensors have increasing numbers
+    grid_h = torch.arange(grid_size_h, dtype=torch.float32, device=conv_out_tensor.device)
+    grid_w = torch.arange(grid_size_w, dtype=torch.float32, device=conv_out_tensor.device)
 
-    # embbed positional embeddings
-    def forward(self, x: torch.Tensor):
-        
-        # (B, T, E) -> (T, E)
-        return x + self.positional_embedding[:x.size(1), :]
+    # 2 tensor tuple, each tensor size=(20, 20)
+    # first tensor has 20 rows filled with same nums (from 0 to 19 rowwise)
+    # second tensor each row reapiting nums (from 0 to 19 inside each row)
+    grid = torch.meshgrid(grid_h, grid_w, indexing='ij')
+    
+    # concat it to one tensor shape=(2, 20, 20)
+    grid = torch.stack(grid, dim=0)
+
+    # flattening: grid_h_positions shape=(number_of_grid_cell_tokens=400)
+    grid_h_positions = grid[0].reshape(-1)
+    grid_w_positions = grid[1].reshape(-1)
+
+    # create factor vector with increasing nums (from 0 to (d_model/4)-1=63)
+    # shape=(d_model/4=64)
+    factor = torch.arange(
+        start=0,
+        end=embed_size // 4,
+        dtype=torch.float32,
+        device=conv_out_tensor.device
+    )
+    
+    # get fractions (normalize)
+    factor /= (embed_size // 4)
+
+    # pos emb formula (first part): factor = 10000^(2i/d_model)
+    # get increasing number vector shape=(64)
+    factor = 10000 ** factor
+
+    # create vertical vector that has 0-19 ints 20 times
+    # shape=(400, 1)
+    vert_h_pos = grid_h_positions[:, None]
+
+    # extrude columnwise by length d_model // 4 = 64
+    # shape=(seq_len=400, d_model/4=64)
+    vert_h_pos_extruded = vert_h_pos.repeat(1, embed_size // 4)
+
+    # grid hight embedding shape=(seq_len=400, d_model/4=64)
+    # along vertical axis we have same vectors reapiting 20 times (representing 0 to 20 feature_h embedding)
+    # along horizontal axis we have deacrising values (len 64)
+    grid_h_emb = vert_h_pos_extruded / factor
+
+    # concat them from the side (so one side is sin, second cos)
+    # shape shape=(seq_len=400, d_model/2=128)
+    grid_h_emb = torch.cat([torch.sin(grid_h_emb), torch.cos(grid_h_emb)], dim=-1)
+
+    # create vertical vector that has 0, 1, 2 ... 19 ints 20 times
+    # shape=(400, 1)
+    horz_w_pos = grid_w_positions[:, None]
+
+    # extrude columnwise by length d_model // 4 = 64
+    # shape=(seq_len=400, d_model/4=64)
+    horz_w_pos_extruded = horz_w_pos.repeat(1, embed_size // 4)
+
+    # grid width embedding shape=(seq_len=400, d_model/4=64)
+    # along vertical axis we have same sets of vectors reapiting 20 times and inside this set we have 0...19 vectors where each vector contains same nums (before factoring)
+    # along horizontal axis we have deacrising values (len 64)
+    grid_w_emb = horz_w_pos_extruded / factor
+
+    # concat them from the side (so one side is sin, second cos)
+    # shape shape=(seq_len=400, d_model/2=128)
+    grid_w_emb = torch.cat([torch.sin(grid_w_emb), torch.cos(grid_w_emb)], dim=-1)
+
+    # final concat where we again concat matricies from the side
+    # shape shape=(seq_len=400, d_model=256)
+    pos_embeded = torch.cat([grid_h_emb, grid_w_emb], dim=-1)
+
+    return pos_embeded
 
 
 class MultiHeadAttention(nn.Module):
@@ -241,8 +301,6 @@ class DETR(nn.Module):
                 param.requires_grad = False
         
         self.backbone_proj = nn.Conv2d(self.backbone_channels, self.d_model, kernel_size=1)
-
-        self.pos_encoding = SinusoidalPositionEncoding(seq_len=self.seq_len, embed_size=self.d_model)
 
         self.encoder = TransformerEncoder(num_layers=self.num_encoder_layers, 
                                           num_heads=self.num_encoder_heads, 
