@@ -7,6 +7,29 @@ from torchvision.models import resnet34
 from scipy.optimize import linear_sum_assignment
 from collections import defaultdict
 
+
+class SinusoidalPositionEncoding(nn.Module):
+    def __init__(self, seq_length: int, embed_size: int):
+        super().__init__()
+        # create positional vector
+        position = torch.arange(seq_length).unsqueeze(1)
+        # create vector of frequencies for pos embedding
+        div_term = torch.exp(torch.arange(0, embed_size, 2) * (-math.log(10000.0) / embed_size))
+        # matrix for pos embbeding
+        pe = torch.zeros(seq_length, embed_size)
+        # fill matrix with freq
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        # save pos matrix to the buffer
+        self.register_buffer('positional_embedding', pe)
+
+    # embbed positional embeddings
+    def forward(self, x: torch.Tensor):
+        
+        # (B, T, E) -> (T, E)
+        return x + self.positional_embedding[:x.size(1), :]
+
+
 class MultiHeadAttention(nn.Module):
     
     def __init__(self, d_model, num_heads):
@@ -19,7 +42,7 @@ class MultiHeadAttention(nn.Module):
         self.d_head = d_model // num_heads
     
     # q parameter is for cross attn
-    def forward(self, x, q_cross=nn.Linear(0.0, 0.0), isCrossAtt=False):
+    def forward(self, x, q_cross=None, isCrossAtt=False):
         # x: (batch, sequence, d_model)
         input_shape = x.shape
         batch, seq_len, d_model = input_shape
@@ -182,6 +205,8 @@ class DETR(nn.Module):
     """
     def __init__(self, config, num_classes, bg_class_idx):
         super().__init__()
+        self.img_h = config['image_h']
+        self.img_w = config['image_w']
         self.backbone_channels = config['backbone_channels']
         self.d_model = config['d_model']
         self.num_queries = config['num_queries']
@@ -201,6 +226,11 @@ class DETR(nn.Module):
         valid_bg_idx = (self.bg_class_idx == 0 or self.bg_class_idx == (self.num_classes - 1))
         assert valid_bg_idx, "Background can only be 0 or num_classes - 1"
 
+        # formula (default torchvision.models.resnet34)
+        # for an input (1, 3, H, W), the spatial size after layer4 
+        # (i.e., before the global avg‑pool)
+        self.seq_len = ((self.img_h + 31) // 32) * ((self.img_w + 31) // 32)
+
         self.backbone = nn.Sequential(*list(resnet34(
             weights=torchvision.models.ResNet34_Weights.IMAGENET1K_V1,
             norm_layer=torchvision.ops.FrozenBatchNorm2d
@@ -211,6 +241,8 @@ class DETR(nn.Module):
                 param.requires_grad = False
         
         self.backbone_proj = nn.Conv2d(self.backbone_channels, self.d_model, kernel_size=1)
+
+        self.pos_encoding = SinusoidalPositionEncoding(seq_len=self.seq_len, embed_size=self.d_model)
 
         self.encoder = TransformerEncoder(num_layers=self.num_encoder_layers, 
                                           num_heads=self.num_encoder_heads, 
@@ -235,3 +267,18 @@ class DETR(nn.Module):
             nn.ReLU(),
             nn.Linear(self.d_model, out_features=4),
         )
+    
+    def forward(self, x, targets=None, score_thresh=0, use_nms=False):
+        # x -> (b, ch, h, w)
+        # default d_model = 256
+        # default c = 3
+        # default h, w = 640, 640
+        # default feat_h, feat_w = 20, 20
+        # default c_back = 512
+        # resnet_stride = 32
+        
+        # (b, c_back=512, feat_h=20, feat_w=20)
+        resnet_out = self.backbone(x)
+
+        # (b, d_model=256, feat_h=20, feat_w=20)
+        conv_out = self.backbone_proj(resnet_out)
