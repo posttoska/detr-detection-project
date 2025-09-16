@@ -87,7 +87,7 @@ def get_spatial_position_embeddings(embed_size: int, conv_out_tensor: torch.Tens
     # shape shape=(seq_len=400, d_model=256)
     pos_embeded = torch.cat([grid_h_emb, grid_w_emb], dim=-1)
 
-    return pos_embeded
+    return pos_embeded, None
 
 
 class MultiHeadAttention(nn.Module):
@@ -95,31 +95,16 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, num_heads):
         super().__init__()
 
-        self.d_model = d_model
         self.num_heads = num_heads
-        self.in_proj = nn.Linear(d_model, 3 * d_model)
         self.out_proj = nn.Linear(d_model, d_model)
         self.d_head = d_model // num_heads
     
     # q parameter is for cross attn
-    def forward(self, x, q_cross=None, isCrossAtt=False):
-        # x: (batch, sequence, d_model)
-        input_shape = x.shape
+    def forward(self, q, k, v):
+        # q, k, v: (b, seq_len, d_model)
+        input_shape = v.shape
         batch, seq_len, d_model = input_shape
-        broadcast_shape = (batch, seq_len, self.num_heads, d_model)
-
-        # (b, seq_len, d_model)
-        x = self.in_proj(x)
-        
-        # 3 * (b, seq_len, d_model)
-        q, k, v = x.chunk(3, dim=-1)
-
-        # cross attention use case
-        if isCrossAtt:
-            q = q_cross
-            is_dim = (q_cross.shape == k.shape) and (q_cross.shape == v.shape)
-            assert is_dim, "cross q must be the same dim as k and v"
-
+        broadcast_shape = (batch, seq_len, self.num_heads, d_model // self.num_heads)
 
         # d_model/num_heads = d_heads
         # (b, num_heads, seq_len, d_heads)
@@ -128,7 +113,7 @@ class MultiHeadAttention(nn.Module):
         v = v.view(broadcast_shape).transpose(1, 2)
 
         # (b, num_heads, seq_len, seq_len)
-        qk = q @ k.transpose(1, 2)
+        qk = q @ k.transpose(-1, -2)
         qk /= math.sqrt(self.d_head)
         
         # we don't need mask for image classification at all
@@ -139,13 +124,17 @@ class MultiHeadAttention(nn.Module):
         qk = F.softmax(qk, dim=-1)
         # (b, num_heads, seq_len, d_heads)
         out = qk @ v
+        # get attention map shape=(b, seq_len, seq_len)
+        att_map = qk.mean(dim=1)
         # (b, seq_len, num_heads, d_heads)
         out = out.transpose(1, 2)
+        # (b, seq_len, d_model)
+        out = out.reshape(input_shape)
 
         # (b, seq_len, d_model)
         out = self.out_proj(out)
 
-        return out
+        return out, att_map
 
 
 class TransformerEncoder(nn.Module):
@@ -193,6 +182,45 @@ class TransformerEncoder(nn.Module):
 
         # norm for encoder output for all encoder outputs
         self.output_norm = nn.LayerNorm(d_model)
+
+    def forward(self, x, spatial_pos_embed):
+        out = x
+        attn_weights = [] 
+
+        # go through all encoder layers
+        for i in range(self.num_layers):
+            # norm MHSA
+            in_attn = self.attn_norms[i](out)
+            # add spacial position embeddings to q and k for MHSA
+            q = in_attn + spatial_pos_embed
+            k = in_attn + spatial_pos_embed
+            v = in_attn
+
+            # MHSA
+            out_attn, attn_weight = self.attns[i](q=q, k=k, v=v)
+            attn_weights.append(attn_weight)
+
+            # dropout MHSA
+            out_attn = self.attn_dropouts[i](out_attn)
+
+            # residual connection MHSA
+            out += out_attn
+
+            # norm MLP
+            in_ff = self.ff_norms[i](out) 
+
+            # MLP
+            out_ff = self.ffs[i](in_ff)
+
+            # dropout MLP
+            out_ff = self.ff_dropouts[i](out_ff)
+
+            # residual connection MLP
+            out += out_ff
+
+            # output norn
+            out = self.output_norm(out)
+            return out, torch.stack(attn_weight)
 
 
 class TransformerDecoder(nn.Module):
@@ -310,7 +338,7 @@ class DETR(nn.Module):
 
         self.query_embed = nn.Parameter(torch.randn(self.num_queries, self.d_model))
 
-        self.encoder = TransformerDecoder(num_layers=self.num_decoder_layers, 
+        self.decoder = TransformerDecoder(num_layers=self.num_decoder_layers, 
                                           num_heads=self.num_decoder_heads, 
                                           d_model=self.d_model,
                                           ff_inner_dim=self.ff_inner_dim, 
@@ -340,3 +368,32 @@ class DETR(nn.Module):
 
         # (b, d_model=256, feat_h=20, feat_w=20)
         conv_out = self.backbone_proj(resnet_out)
+
+        batch_size, d_model, feat_h, feat_w = conv_out.shape
+        # shape=(seq_len=400, d_model=256)
+        spatial_pos_embed = get_spatial_position_embeddings(self.d_model, conv_out)
+        
+        # reshape and transpose new shape=(b, seq_len=400, d_model=256)
+        # feat_h=20 * feat_w=20 => seq_len=400
+        conv_out = conv_out.reshape(batch_size, d_model, feat_h * feat_w).transpose(1, 2)
+
+        # encoder call
+        # enc_output out shape=(b, seq_len, d_model)
+        # enc_att_weights out shape=(num_encoder_layers, b, seq_len, d_model)
+        enc_output, enc_att_weights = self.encoder(conv_out, spatial_pos_embed)
+        
+        # old query reshaped to shape=(b, query_embed, d_model)
+        query_reshaped = self.query_embed.unsqueeze(0).repeat((batch_size, 1, 1))
+        # init new query objects all to zeros
+        query_objects_zeros = torch.zeros_like(query_reshaped)
+        
+        # query_objects out shape=(num_decoder_layers, b, num_queries, num_classes)
+        # decoder_attn_weights out shape=(num_decoder_layers, b, num_queries, seq_len)
+        query_objects, decoder_attn_weights = self.decoder(query_objects_zeros, enc_output, query_reshaped, spatial_pos_embed)
+
+        # shape=(num_decoder_layers, b, num_queries, num_classes)
+        cls_output = self.class_mlp(query_objects)
+
+        # shape=(num_decoder_layers, b, num_queries, coord=4)
+        bbox_output = self.bbox_mlp(query_objects).sigmoid()
+        
