@@ -84,7 +84,7 @@ def get_spatial_position_embeddings(embed_size: int, conv_out_tensor: torch.Tens
     grid_w_emb = torch.cat([torch.sin(grid_w_emb), torch.cos(grid_w_emb)], dim=-1)
 
     # final concat where we again concat matricies from the side
-    # shape shape=(seq_len=400, d_model=256)
+    # output shape=(seq_len=400, d_model=256)
     pos_embeded = torch.cat([grid_h_emb, grid_w_emb], dim=-1)
 
     return pos_embeded, None
@@ -184,8 +184,12 @@ class TransformerEncoder(nn.Module):
         self.output_norm = nn.LayerNorm(d_model)
 
     def forward(self, x, spatial_pos_embed):
+        """
+        *) x input shape=(b, seq_len, d_model)
+        *) spatial_pos_embed shape=(seq_len=400, d_model=256)
+        """
         out = x
-        attn_weights = [] 
+        attn_weights = []
 
         # go through all encoder layers
         for i in range(self.num_layers):
@@ -280,6 +284,71 @@ class TransformerDecoder(nn.Module):
         # norm for decoder output for all decoder outputs
         self.output_norm = nn.LayerNorm(d_model)
 
+    def forward(self, query_objects, encoder_output, query_embed, spatial_pos_embed):
+        """
+        *) query object input shape=(b, query_embed=25, d_model=256)
+        *) encoder output input shape=(b, seq_len=400, d_model=256)
+        *) query_embed shape=(b, query_embed=25, d_model=256)
+        *) spatial_pos_embed shape=(seq_len=400, d_model=256)
+        """
+        out = query_objects
+        decoder_outputs = []
+        decoder_cross_attn_weights = []
+
+        # go through all encoder layers
+        for i in range(self.num_layers):
+
+            # norm MHSA
+            in_attn = self.attn_norms[i](out)
+
+            # add query embeddings to q and k for MHSA
+            q = in_attn + query_embed
+            k = in_attn + query_embed
+            v = in_attn
+
+            # MHSA
+            out_attn, _ = self.attns[i](q=q, k=k, v=v)
+            
+            # dropout MHSA
+            out_attn = self.attn_dropouts[i](out_attn)
+
+            # residual connection MHSA
+            out += out_attn
+
+            # norm MHCA
+            in_attn = self.cross_attn_norms[i](out)
+
+            # add query embeddings to q and spatial pos embedding to k for MHCA
+            # where v will cross with encoder output
+            # q shape=(b, query_embed=25, d_model=256)
+            # k shape=(b, seq_len=400, d_model=256)
+            # v shape=(b, seq_len=400, d_model=256)
+            q = in_attn + query_embed
+            k = encoder_output + spatial_pos_embed
+            v = encoder_output
+            # croos_att trouble
+
+
+
+
+
+
+            # norm MLP
+            in_ff = self.ff_norms[i](out) 
+
+            # MLP
+            out_ff = self.ffs[i](in_ff)
+
+            # dropout MLP
+            out_ff = self.ff_dropouts[i](out_ff)
+
+            # residual connection MLP
+            out += out_ff
+
+            # output norn
+            out = self.output_norm(out)
+            return out, torch.stack(attn_weight)
+
 
 class DETR(nn.Module):
     r"""
@@ -315,7 +384,7 @@ class DETR(nn.Module):
         assert valid_bg_idx, "Background can only be 0 or num_classes - 1"
 
         # formula (default torchvision.models.resnet34)
-        # for an input (1, 3, H, W), the spatial size after layer4 
+        # for an input (1, 3, H, W), the spatial size after layer4
         # (i.e., before the global avg‑pool)
         self.seq_len = ((self.img_h + 31) // 32) * ((self.img_w + 31) // 32)
 
