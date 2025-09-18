@@ -119,6 +119,8 @@ class MultiHeadAttention(nn.Module):
         # we don't need mask for image classification at all
         # mask = torch.ones_like(qk, dtype=torch.bool).triu(1)
         # qk.masked_fill_(mask, -torch.inf)
+        # extra comment
+
 
         # (b, num_heads, seq_len, seq_len)
         qk = F.softmax(qk, dim=-1)
