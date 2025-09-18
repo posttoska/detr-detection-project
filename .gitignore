@@ -1,20 +1,20 @@
-# Ignore all image files
-*.jpg
-*.png
-*.jpeg
 
-# Ignore pycharm and system files
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.idea/
+
+
 .DS_Store
-*.idea
-__pycache__
-*.zip
 
-# Ignore dataset files
+
 *.csv
 *.json
-
-# Ignore checkpoints
+*.zip
 *.pth
-
-# Ignore pickle files
 *.pkl
+
+
+*.jpg
+*.jpeg
+*.png
