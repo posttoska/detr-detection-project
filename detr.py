@@ -96,41 +96,106 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
 
         self.num_heads = num_heads
+        self.in_proj = nn.Linear(d_model, d_model)
         self.out_proj = nn.Linear(d_model, d_model)
         self.d_head = d_model // num_heads
     
     # q parameter is for cross attn
     def forward(self, q, k, v):
-        # q, k, v: (b, seq_len, d_model)
-        input_shape = v.shape
-        batch, seq_len, d_model = input_shape
-        broadcast_shape = (batch, seq_len, self.num_heads, d_model // self.num_heads)
+        """
+            SELF ATTN CASE:
+                Q, K, V TENSORS: (B, seq_len=400, d_model=256)
+            CROSS ATTN CASE:
+                Q TENSOR:        (B, qemb=25, d_model=256)
+                K, V TENSORS:    (B, seq_len=400, d_model=256)
+        """
+        Qb, Ql, Qe = q.shape
+        Kb, Kl, Ke = k.shape
+        Vb, Vl, Ve = v.shape
+        broadcast_shape_Q = (Qb, Ql, self.num_heads, self.d_head)
+        broadcast_shape_K = (Kb, Kl, self.num_heads, self.d_head)
+        broadcast_shape_V = (Vb, Vl, self.num_heads, self.d_head)
 
-        # d_model/num_heads = d_heads
-        # (b, num_heads, seq_len, d_heads)
-        q = q.view(broadcast_shape).transpose(1, 2)
-        k = k.view(broadcast_shape).transpose(1, 2)
-        v = v.view(broadcast_shape).transpose(1, 2)
+        # linear proj layer
+        q = self.in_proj(q)
+        k = self.in_proj(k)
+        v = self.in_proj(v)
 
-        # (b, num_heads, seq_len, seq_len)
-        qk = q @ k.transpose(-1, -2)
+        """
+            SELF ATTN CASE:
+                -----> INPUT Q, K, V TENSORS: (B, seq_len=400, d_model=256)
+                -----> OUTPUT TENSOR: (B, seq_len=400, h_num=8, d_head=32)
+            CROSS ATTN CASE:
+                -----> INPUT Q     TENSOR:  (B, qemb=25, d_model=256)
+                -----> INPUT K, V  TENSORS: (B, seq_len=400, d_model=256)
+                -----> OUTPUT Q    TENSOR:  (B, qemb=25, h_num=8, d_head=32)
+                -----> OUTPUT K, V TENSOR:  (B, seq_len=400, h_num=8, d_head=32)
+        """
+        q = q.view(broadcast_shape_Q)
+        k = k.view(broadcast_shape_K)
+        v = v.view(broadcast_shape_V)
+
+        """
+            SELF ATTN CASE:
+                -----> INPUT Q, K, V TENSORS: (B, seq_len=400, h_num=8, d_head=32)
+                -----> OUTPUT TENSOR: (B, h_num=8, seq_len=400, d_head=32)
+            CROSS ATTN CASE:
+                -----> INPUT Q     TENSOR:  (B, qemb=25, h_num=8, d_head=32)
+                -----> INPUT K, V  TENSORS: (B, seq_len=400, h_num=8, d_head=32)
+                -----> OUTPUT Q    TENSOR:  (B, h_num=8, qemb=25,  d_head=32)
+                -----> OUTPUT K, V TENSOR:  (B, h_num=8, seq_len=400, d_head=32)
+        """
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        """
+            SELF ATTN CASE:
+                -----> INPUT Q@K.T:        (B, h_num=8, seq_len=400, d_head=32) @ (B, h_num=8, d_head=32, seq_len=400)
+                -----> OUTPUT ATTN TENSOR: (B, h_num=8, seq_len=400, seq_len=400)
+            CROSS ATTN CASE:
+                -----> INPUT Q@K.T:        (B, h_num=8, qemb=25, d_head=32) @ (B, h_num=8, d_head=32, seq_len=400)
+                -----> OUTPUT ATTN TENSOR: (B, h_num=8, qemb=25, seq_len=400)
+        """
+        qk = q @ k.transpose(2, 3)
         qk /= math.sqrt(self.d_head)
         
         # we don't need mask for image classification at all
         # mask = torch.ones_like(qk, dtype=torch.bool).triu(1)
         # qk.masked_fill_(mask, -torch.inf)
 
-
-        # (b, num_heads, seq_len, seq_len)
         qk = F.softmax(qk, dim=-1)
-        # (b, num_heads, seq_len, d_heads)
+        """
+            SELF ATTN CASE:
+                -----> INPUT ATTN@V:  (B, h_num=8, seq_len=400, seq_len=400) @ (B, h_num=8, seq_len=400, d_head=32)
+                -----> ATTN TENSOR:   (B, h_num=8, seq_len=400, d_head=32)
+            CROSS ATTN CASE:
+                -----> INPUT ATTN@V:  (B, h_num=8, qemb=25, seq_len=400) @ (B, h_num=8, seq_len=400, d_head=32)
+                -----> OUTPUT TENSOR: (B, h_num=8, qemb=25, d_head=32)
+        """
         out = qk @ v
         # get attention map shape=(b, seq_len, seq_len)
         att_map = qk.mean(dim=1)
-        # (b, seq_len, num_heads, d_heads)
+
+        """
+            SELF ATTN CASE:
+                -----> INPUT OUT TENSOR:  (B, h_num=8, seq_len=400, d_head=32)
+                -----> OUTPUT OUT TENSOR: (B, seq_len=400, h_num=8, d_head=32)
+            CROSS ATTN CASE:
+                -----> INPUT OUT TENSOR:  (B, h_num=8, qemb=25, d_head=32)
+                -----> OUTPUT TENSOR:     (B, qemb=25, h_num=8, d_head=32)
+        """
         out = out.transpose(1, 2)
-        # (b, seq_len, d_model)
-        out = out.reshape(input_shape)
+
+        """
+            SELF ATTN CASE:
+                -----> INPUT OUT TENSOR:  (B, seq_len=400, h_num=8, d_head=32)
+                -----> OUTPUT OUT TENSOR: (B, seq_len=400, d_model=256)
+            CROSS ATTN CASE:
+                -----> INPUT OUT TENSOR:  (B, qemb=25, h_num=8, d_head=32)
+                -----> OUTPUT TENSOR:     (B, qemb=25, d_model=256)
+        """
+        out = out.reshape(Qb, Ql, Qe)
 
         # (b, seq_len, d_model)
         out = self.out_proj(out)
@@ -160,7 +225,6 @@ class TransformerEncoder(nn.Module):
         self.ffs = nn.ModuleList(
             [
                 nn.Sequential(
-                    # (b, seq_len, d_model)
                     nn.Linear(d_model, ff_inner_dim),
                     nn.ReLU(),
                     # (b, seq_len, d_model)
@@ -186,8 +250,7 @@ class TransformerEncoder(nn.Module):
 
     def forward(self, x, spatial_pos_embed):
         """
-        *) x input shape=(b, seq_len, d_model)
-        *) spatial_pos_embed shape=(seq_len=400, d_model=256)
+            -----> X TENSOR: (B, seq_len=400, d_model=256)
         """
         out = x
         attn_weights = []
@@ -196,12 +259,19 @@ class TransformerEncoder(nn.Module):
         for i in range(self.num_layers):
             # norm MHSA
             in_attn = self.attn_norms[i](out)
+
+            """
+                -----> Q, K, V TENSORS: (B, seq_len=400, d_model=256)
+            """
             # add spacial position embeddings to q and k for MHSA
             q = in_attn + spatial_pos_embed
             k = in_attn + spatial_pos_embed
             v = in_attn
 
-            # MHSA
+            """
+                 -----> INPUT Q, K, V TENSORS: (B, seq_len=400, d_model=256) 
+                 -----> OUTPUT TENSOR:         (B, seq_len=400, d_model=256)
+            """
             out_attn, attn_weight = self.attns[i](q=q, k=k, v=v)
             attn_weights.append(attn_weight)
 
@@ -212,9 +282,12 @@ class TransformerEncoder(nn.Module):
             out += out_attn
 
             # norm MLP
-            in_ff = self.ff_norms[i](out) 
+            in_ff = self.ff_norms[i](out)
 
-            # MLP
+            """
+                 -----> INPUT Q, K, V TENSORS: (B, seq_len=400, d_model=256) 
+                 -----> OUTPUT TENSOR:         (B, seq_len=400, d_model=256)
+            """
             out_ff = self.ffs[i](in_ff)
 
             # dropout MLP
@@ -287,10 +360,10 @@ class TransformerDecoder(nn.Module):
 
     def forward(self, query_objects, encoder_output, query_embed, spatial_pos_embed):
         """
-        *) query object input shape=(b, query_embed=25, d_model=256)
-        *) encoder output input shape=(b, seq_len=400, d_model=256)
-        *) query_embed shape=(b, query_embed=25, d_model=256)
-        *) spatial_pos_embed shape=(seq_len=400, d_model=256)
+            -----> ZERO QEMB INPUT TENSOR: (B, qemb=25, d_model=256)
+            -----> INPUT ENC TENSOR:       (B, seq_len=400, d_model=256)
+            -----> INPUT QEMB TENSOR:      (B, qemb=25, d_model=256)
+            -----> INPUT POS TENSOR:       (seq_len=400, d_model=256)
         """
         out = query_objects
         decoder_outputs = []
@@ -302,12 +375,17 @@ class TransformerDecoder(nn.Module):
             # norm MHSA
             in_attn = self.attn_norms[i](out)
 
-            # add query embeddings to q and k for MHSA
+            """
+                -----> Q, K, V TENSORS: (B, qemb=25, d_model=256)
+            """
             q = in_attn + query_embed
             k = in_attn + query_embed
             v = in_attn
 
-            # MHSA
+            """
+                 -----> INPUT Q, K, V TENSORS: (B, qemb=25, d_model=256) 
+                 -----> OUTPUT TENSOR:         (B, qemb=25, d_model=256)
+            """
             out_attn, _ = self.attns[i](q=q, k=k, v=v)
             
             # dropout MHSA
@@ -324,12 +402,16 @@ class TransformerDecoder(nn.Module):
             # q shape=(b, query_embed=25, d_model=256)
             # k shape=(b, seq_len=400, d_model=256)
             # v shape=(b, seq_len=400, d_model=256)
+            """
+                 -----> Q TENSOR:     (B, qemb=25, d_model=256) 
+                 -----> K, V TENSORS: (B, seq_len=400, d_model=256) 
+            """
             q = in_attn + query_embed
             k = encoder_output + spatial_pos_embed
             v = encoder_output
-            # croos_att trouble
 
-            .....
+            out_attn, decoder_cross_attn = self.cross_attns[i]()(q=q, k=k, v=v)
+
 
 
 
@@ -415,119 +497,149 @@ class DETR(nn.Module):
         # resnet_stride = 32
 
         """
-        op_formula = [([width+2*pad]-(kernel-1))/stride]*[([height+2*pad]-(kernel-1))/stride]
+            op_formula = [([width+2*pad]-(kernel-1))/stride]*[([height+2*pad]-(kernel-1))/stride]
 
-        BACKBONE resnet 1 conv layer: [([640+2*3]-(7-1))/2]*[([640+2*3]-(7-1))/2] = 102400 op (320x320)x64c
-        BACKBONE resnet 1 pool layer: [([320+2*1]-(3-1))/2]*[([320+2*1]-(3-1))/2] = 25600 op (160x160)x64c
+            BACKBONE resnet 1 conv layer: [([640+2*3]-(7-1))/2]*[([640+2*3]-(7-1))/2] = 102400 op (320x320)x64c
+            BACKBONE resnet 1 pool layer: [([320+2*1]-(3-1))/2]*[([320+2*1]-(3-1))/2] = 25600 op (160x160)x64c
 
-        BACKBONE resnet 2 conv layer: [([160+2*1]-(3-1))/1]*[([160+2*1]-(3-1))/1] = 25600 op (160x160)x64c
-        BACKBONE resnet 3 conv layer: [([160+2*1]-(3-1))/1]*[([160+2*1]-(3-1))/1] = 25600 op (160x160)x64c
-        BACKBONE resnet 4 conv layer: [([160+2*1]-(3-1))/1]*[([160+2*1]-(3-1))/1] = 25600 op (160x160)x64c
-        BACKBONE resnet 5 conv layer: [([160+2*1]-(3-1))/1]*[([160+2*1]-(3-1))/1] = 25600 op (160x160)x64c
-        BACKBONE resnet 6 conv layer: [([160+2*1]-(3-1))/1]*[([160+2*1]-(3-1))/1] = 25600 op (160x160)x64c
-        BACKBONE resnet 7 conv layer: [([160+2*1]-(3-1))/1]*[([160+2*1]-(3-1))/1] = 25600 op (160x160)x64c
+            BACKBONE resnet 2 conv layer: [([160+2*1]-(3-1))/1]*[([160+2*1]-(3-1))/1] = 25600 op (160x160)x64c
+            BACKBONE resnet 3 conv layer: [([160+2*1]-(3-1))/1]*[([160+2*1]-(3-1))/1] = 25600 op (160x160)x64c
+            BACKBONE resnet 4 conv layer: [([160+2*1]-(3-1))/1]*[([160+2*1]-(3-1))/1] = 25600 op (160x160)x64c
+            BACKBONE resnet 5 conv layer: [([160+2*1]-(3-1))/1]*[([160+2*1]-(3-1))/1] = 25600 op (160x160)x64c
+            BACKBONE resnet 6 conv layer: [([160+2*1]-(3-1))/1]*[([160+2*1]-(3-1))/1] = 25600 op (160x160)x64c
+            BACKBONE resnet 7 conv layer: [([160+2*1]-(3-1))/1]*[([160+2*1]-(3-1))/1] = 25600 op (160x160)x64c
 
-        BACKBONE resnet 8 conv layer: [([160+2*1]-(3-1))/2]*[([160+2*1]-(3-1))/2] = 6400 op (80x80)x128c (downsampling /2)
-        BACKBONE resnet 9 conv layer:  [([80+2*1]-(3-1))/1]*[([80+2*1]-(3-1))/1] = 6400 op (80x80)x128c
-        BACKBONE resnet 10 conv layer: [([80+2*1]-(3-1))/1]*[([80+2*1]-(3-1))/1] = 6400 op (80x80)x128c
-        BACKBONE resnet 11 conv layer: [([80+2*1]-(3-1))/1]*[([80+2*1]-(3-1))/1] = 6400 op (80x80)x128c
-        BACKBONE resnet 12 conv layer: [([80+2*1]-(3-1))/1]*[([80+2*1]-(3-1))/1] = 6400 op (80x80)x128c
-        BACKBONE resnet 13 conv layer: [([80+2*1]-(3-1))/1]*[([80+2*1]-(3-1))/1] = 6400 op (80x80)x128c
-        BACKBONE resnet 14 conv layer: [([80+2*1]-(3-1))/1]*[([80+2*1]-(3-1))/1] = 6400 op (80x80)x128c
-        BACKBONE resnet 15 conv layer: [([80+2*1]-(3-1))/1]*[([80+2*1]-(3-1))/1] = 6400 op (80x80)x128c
+            BACKBONE resnet 8 conv layer: [([160+2*1]-(3-1))/2]*[([160+2*1]-(3-1))/2] = 6400 op (80x80)x128c (downsampling /2)
+            BACKBONE resnet 9 conv layer:  [([80+2*1]-(3-1))/1]*[([80+2*1]-(3-1))/1] = 6400 op (80x80)x128c
+            BACKBONE resnet 10 conv layer: [([80+2*1]-(3-1))/1]*[([80+2*1]-(3-1))/1] = 6400 op (80x80)x128c
+            BACKBONE resnet 11 conv layer: [([80+2*1]-(3-1))/1]*[([80+2*1]-(3-1))/1] = 6400 op (80x80)x128c
+            BACKBONE resnet 12 conv layer: [([80+2*1]-(3-1))/1]*[([80+2*1]-(3-1))/1] = 6400 op (80x80)x128c
+            BACKBONE resnet 13 conv layer: [([80+2*1]-(3-1))/1]*[([80+2*1]-(3-1))/1] = 6400 op (80x80)x128c
+            BACKBONE resnet 14 conv layer: [([80+2*1]-(3-1))/1]*[([80+2*1]-(3-1))/1] = 6400 op (80x80)x128c
+            BACKBONE resnet 15 conv layer: [([80+2*1]-(3-1))/1]*[([80+2*1]-(3-1))/1] = 6400 op (80x80)x128c
 
-        BACKBONE resnet 16 conv layer: [([80+2*1]-(3-1))/2]*[([80+2*1]-(3-1))/2] = 1600 op (40x40)x256c (downsampling /2)
-        BACKBONE resnet 17 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
-        BACKBONE resnet 18 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
-        BACKBONE resnet 19 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
-        BACKBONE resnet 20 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
-        BACKBONE resnet 21 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
-        BACKBONE resnet 22 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
-        BACKBONE resnet 23 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
-        BACKBONE resnet 24 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
-        BACKBONE resnet 25 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
-        BACKBONE resnet 26 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
-        BACKBONE resnet 27 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
+            BACKBONE resnet 16 conv layer: [([80+2*1]-(3-1))/2]*[([80+2*1]-(3-1))/2] = 1600 op (40x40)x256c (downsampling /2)
+            BACKBONE resnet 17 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
+            BACKBONE resnet 18 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
+            BACKBONE resnet 19 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
+            BACKBONE resnet 20 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
+            BACKBONE resnet 21 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
+            BACKBONE resnet 22 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
+            BACKBONE resnet 23 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
+            BACKBONE resnet 24 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
+            BACKBONE resnet 25 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
+            BACKBONE resnet 26 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
+            BACKBONE resnet 27 conv layer: [([40+2*1]-(3-1))/1]*[([40+2*1]-(3-1))/1] = 1600 op (40x40)x256c
 
-        BACKBONE resnet 28 conv layer: [([40+2*1]-(3-1))/2]*[([40+2*1]-(3-1))/2] = 400 op (20x20)x512c (downsampling /2)
-        BACKBONE resnet 29 conv layer: [([20+2*1]-(3-1))/1]*[([20+2*1]-(3-1))/1] = 400 op (20x20)x512c
-        BACKBONE resnet 30 conv layer: [([20+2*1]-(3-1))/1]*[([20+2*1]-(3-1))/1] = 400 op (20x20)x512c
-        BACKBONE resnet 31 conv layer: [([20+2*1]-(3-1))/1]*[([20+2*1]-(3-1))/1] = 400 op (20x20)x512c
-        BACKBONE resnet 32 conv layer: [([20+2*1]-(3-1))/1]*[([20+2*1]-(3-1))/1] = 400 op (20x20)x512c
-        BACKBONE resnet 33 conv layer: [([20+2*1]-(3-1))/1]*[([20+2*1]-(3-1))/1] = 400 op (20x20)x512c (output layer in our case)
-
-
+            BACKBONE resnet 28 conv layer: [([40+2*1]-(3-1))/2]*[([40+2*1]-(3-1))/2] = 400 op (20x20)x512c (downsampling /2)
+            BACKBONE resnet 29 conv layer: [([20+2*1]-(3-1))/1]*[([20+2*1]-(3-1))/1] = 400 op (20x20)x512c
+            BACKBONE resnet 30 conv layer: [([20+2*1]-(3-1))/1]*[([20+2*1]-(3-1))/1] = 400 op (20x20)x512c
+            BACKBONE resnet 31 conv layer: [([20+2*1]-(3-1))/1]*[([20+2*1]-(3-1))/1] = 400 op (20x20)x512c
+            BACKBONE resnet 32 conv layer: [([20+2*1]-(3-1))/1]*[([20+2*1]-(3-1))/1] = 400 op (20x20)x512c
+            BACKBONE resnet 33 conv layer: [([20+2*1]-(3-1))/1]*[([20+2*1]-(3-1))/1] = 400 op (20x20)x512c (output layer in our case)
 
 
 
-        -----------------------------------------------------------------------------------------------------------------
-        -----> INPUT TENSOR: (B, c=3, h=640, w=640)
-        BACKBONE resnet 1 conv layer: (B,  3, 640, 640)      <conv2d> (c=3, out_c=64, k=7x7, st=2, pd=3) -> (B, 64, 320, 320) [102400 op]
-        BACKBONE resnet 1 pool layer: (B, 64, 320, 320)      <pool2d> (k=3x3, st=2, pd=1)                -> (B, 64, 160, 160) [25600 op]
 
-        BACKBONE resnet 2 conv layer: (B, 64, 160, 160)      <conv2d> (c=64, out_c=64, k=3x3, st=1, pd=1) -> (B, 64, 320, 320) [25600 op]
-        BACKBONE resnet 3 conv layer: (B, 64, 160, 160)      <conv2d> (c=64, out_c=64, k=3x3, st=1, pd=1) -> (B, 64, 320, 320) [25600 op]
-        BACKBONE resnet 4 conv layer: (B, 64, 160, 160)      <conv2d> (c=64, out_c=64, k=3x3, st=1, pd=1) -> (B, 64, 320, 320) [25600 op]
-        BACKBONE resnet 5 conv layer: (B, 64, 160, 160)      <conv2d> (c=64, out_c=64, k=3x3, st=1, pd=1) -> (B, 64, 320, 320) [25600 op]
-        BACKBONE resnet 6 conv layer: (B, 64, 160, 160)      <conv2d> (c=64, out_c=64, k=3x3, st=1, pd=1) -> (B, 64, 320, 320) [25600 op]
-        BACKBONE resnet 7 conv layer: (B, 64, 160, 160)      <conv2d> (c=64, out_c=64, k=3x3, st=1, pd=1) -> (B, 64, 320, 320) [25600 op]
 
-        BACKBONE resnet 8 conv layer: (B, 64, 160, 160) <conv2d> (c=64, out_c=128, k=3x3, st=2, pd=1) -> (B, 128, 80, 80) [6400 op] (downsampling /2)
-        BACKBONE resnet 9 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=128, k=3x3, st=1, pd=1) -> (B, 128, 80, 80) [6400 op]
-        BACKBONE resnet 10 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=128, k=3x3, st=1, pd=1) -> (B, 128, 80, 80) [6400 op]
-        BACKBONE resnet 11 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=128, k=3x3, st=1, pd=1) -> (B, 128, 80, 80) [6400 op]
-        BACKBONE resnet 12 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=128, k=3x3, st=1, pd=1) -> (B, 128, 80, 80) [6400 op]
-        BACKBONE resnet 13 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=128, k=3x3, st=1, pd=1) -> (B, 128, 80, 80) [6400 op]
-        BACKBONE resnet 14 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=128, k=3x3, st=1, pd=1) -> (B, 128, 80, 80) [6400 op]
-        BACKBONE resnet 15 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=128, k=3x3, st=1, pd=1) -> (B, 128, 80, 80) [6400 op]
+            -----------------------------------------------------------------------------------------------------------------
+            -----> INPUT TENSOR: (B, c=3, h=640, w=640)
+            BACKBONE resnet 1 conv layer: (B,  3, 640, 640)      <conv2d> (c=3, out_c=64, k=7x7, st=2, pd=3) -> (B, 64, 320, 320) [102400 op]
+            BACKBONE resnet 1 pool layer: (B, 64, 320, 320)      <pool2d> (k=3x3, st=2, pd=1)                -> (B, 64, 160, 160) [25600 op]
 
-        BACKBONE resnet 16 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=256, k=3x3, st=2, pd=1) -> (B, 256, 40, 40) [1600 op] (downsampling /2)
-        BACKBONE resnet 17 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
-        BACKBONE resnet 18 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
-        BACKBONE resnet 19 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
-        BACKBONE resnet 20 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
-        BACKBONE resnet 21 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
-        BACKBONE resnet 22 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
-        BACKBONE resnet 23 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
-        BACKBONE resnet 24 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
-        BACKBONE resnet 25 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
-        BACKBONE resnet 26 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
-        BACKBONE resnet 27 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
+            BACKBONE resnet 2 conv layer: (B, 64, 160, 160)      <conv2d> (c=64, out_c=64, k=3x3, st=1, pd=1) -> (B, 64, 320, 320) [25600 op]
+            BACKBONE resnet 3 conv layer: (B, 64, 160, 160)      <conv2d> (c=64, out_c=64, k=3x3, st=1, pd=1) -> (B, 64, 320, 320) [25600 op]
+            BACKBONE resnet 4 conv layer: (B, 64, 160, 160)      <conv2d> (c=64, out_c=64, k=3x3, st=1, pd=1) -> (B, 64, 320, 320) [25600 op]
+            BACKBONE resnet 5 conv layer: (B, 64, 160, 160)      <conv2d> (c=64, out_c=64, k=3x3, st=1, pd=1) -> (B, 64, 320, 320) [25600 op]
+            BACKBONE resnet 6 conv layer: (B, 64, 160, 160)      <conv2d> (c=64, out_c=64, k=3x3, st=1, pd=1) -> (B, 64, 320, 320) [25600 op]
+            BACKBONE resnet 7 conv layer: (B, 64, 160, 160)      <conv2d> (c=64, out_c=64, k=3x3, st=1, pd=1) -> (B, 64, 320, 320) [25600 op]
 
-        BACKBONE resnet 28 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=512, k=3x3, st=2, pd=1) -> (B, 512, 20, 20) [400 op] (downsampling /2)
-        BACKBONE resnet 29 conv layer: (B, 512, 20, 20) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 512, 20, 20) [400 op]
-        BACKBONE resnet 30 conv layer: (B, 512, 20, 20) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 512, 20, 20) [400 op]
-        BACKBONE resnet 31 conv layer: (B, 512, 20, 20) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 512, 20, 20) [400 op]
-        BACKBONE resnet 32 conv layer: (B, 512, 20, 20) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 512, 20, 20) [400 op]
-        BACKBONE resnet 33 conv layer: (B, 512, 20, 20) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 512, 20, 20) [400 op] (output layer in our case)
+            BACKBONE resnet 8 conv layer: (B, 64, 160, 160) <conv2d> (c=64, out_c=128, k=3x3, st=2, pd=1) -> (B, 128, 80, 80) [6400 op] (downsampling /2)
+            BACKBONE resnet 9 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=128, k=3x3, st=1, pd=1) -> (B, 128, 80, 80) [6400 op]
+            BACKBONE resnet 10 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=128, k=3x3, st=1, pd=1) -> (B, 128, 80, 80) [6400 op]
+            BACKBONE resnet 11 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=128, k=3x3, st=1, pd=1) -> (B, 128, 80, 80) [6400 op]
+            BACKBONE resnet 12 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=128, k=3x3, st=1, pd=1) -> (B, 128, 80, 80) [6400 op]
+            BACKBONE resnet 13 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=128, k=3x3, st=1, pd=1) -> (B, 128, 80, 80) [6400 op]
+            BACKBONE resnet 14 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=128, k=3x3, st=1, pd=1) -> (B, 128, 80, 80) [6400 op]
+            BACKBONE resnet 15 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=128, k=3x3, st=1, pd=1) -> (B, 128, 80, 80) [6400 op]
 
-        -----> INPUT TENSOR: (B, c=3, h=640, w=640) -----> OUTPUT TENSOR: (B, c=512, h=20, w=20)
+            BACKBONE resnet 16 conv layer: (B, 128, 80, 80) <conv2d> (c=128, out_c=256, k=3x3, st=2, pd=1) -> (B, 256, 40, 40) [1600 op] (downsampling /2)
+            BACKBONE resnet 17 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
+            BACKBONE resnet 18 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
+            BACKBONE resnet 19 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
+            BACKBONE resnet 20 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
+            BACKBONE resnet 21 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
+            BACKBONE resnet 22 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
+            BACKBONE resnet 23 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
+            BACKBONE resnet 24 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
+            BACKBONE resnet 25 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
+            BACKBONE resnet 26 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
+            BACKBONE resnet 27 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 128, 40, 40) [1600 op]
+
+            BACKBONE resnet 28 conv layer: (B, 256, 40, 40) <conv2d> (c=256, out_c=512, k=3x3, st=2, pd=1) -> (B, 512, 20, 20) [400 op] (downsampling /2)
+            BACKBONE resnet 29 conv layer: (B, 512, 20, 20) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 512, 20, 20) [400 op]
+            BACKBONE resnet 30 conv layer: (B, 512, 20, 20) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 512, 20, 20) [400 op]
+            BACKBONE resnet 31 conv layer: (B, 512, 20, 20) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 512, 20, 20) [400 op]
+            BACKBONE resnet 32 conv layer: (B, 512, 20, 20) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 512, 20, 20) [400 op]
+            BACKBONE resnet 33 conv layer: (B, 512, 20, 20) <conv2d> (c=256, out_c=256, k=3x3, st=1, pd=1) -> (B, 512, 20, 20) [400 op] (output layer in our case)
+
+            -----> INPUT TENSOR: (B, c=3, h=640, w=640)
+            -----> OUTPUT TENSOR: (B, feat_c=512, feat_h=20, feat_w=20)
         """
         resnet_out = self.backbone(x)
 
-        # (b, d_model=256, feat_h=20, feat_w=20)
+        """
+            -----> INPUT TENSOR:  (B, feat_c=512,  feat_h=20, feat_w=20) 
+            -----> OUTPUT TENSOR: (B, d_model=256, feat_h=20, feat_w=20)
+        """
         conv_out = self.backbone_proj(resnet_out)
 
+        """
+            -----> INPUT TENSOR:  (B, d_model=256, feat_h=20, feat_w=20)
+            -----> OUTPUT TENSOR: (seq_len=400, d_model=256)
+        """
         batch_size, d_model, feat_h, feat_w = conv_out.shape
-        # shape=(seq_len=400, d_model=256)
-        spatial_pos_embed = get_spatial_position_embeddings(self.d_model, conv_out)
-        
-        # reshape and transpose new shape=(b, seq_len=400, d_model=256)
-        # feat_h=20 * feat_w=20 => seq_len=400
-        conv_out = conv_out.reshape(batch_size, d_model, feat_h * feat_w).transpose(1, 2)
+        spatial_pos_embed = get_spatial_position_embeddings(d_model, conv_out)
 
-        # encoder call
-        # enc_output out shape=(b, seq_len, d_model)
-        # enc_att_weights out shape=(num_encoder_layers, b, seq_len, d_model)
+        """
+            -----> INPUT TENSOR:  (B, d_model=256, feat_h=20, feat_w=20)
+            -----> OUTPUT TENSOR: (B, d_model=256, seq_len=400)
+        """
+        conv_out = conv_out.reshape(batch_size, d_model, feat_h * feat_w)
+
+        """
+            -----> INPUT TENSOR:  (B, d_model=256, seq_len=400)
+            -----> OUTPUT TENSOR: (B, seq_len=400, d_model=256)
+        """
+        conv_out = conv_out.transpose(1, 2)
+
+        """
+            -----> INPUT ENC TENSOR:   (B, seq_len=400, d_model=256)
+            
+            -----> OUTPUT ENC TENSOR:  (B, seq_len=400, d_model=256)
+            -----> OUTPUT ATTN TENSOR: (layers=4, B, seq_len=400, seq_len=400)
+        """
         enc_output, enc_att_weights = self.encoder(conv_out, spatial_pos_embed)
-        
-        # old query reshaped to shape=(b, query_embed, d_model)
+
+        """
+            -----> INPUT TENSOR:  (qemb=25, d_model=256)
+            -----> OUTPUT TENSOR: (B, qemb=25, d_model=256)
+        """
         query_reshaped = self.query_embed.unsqueeze(0).repeat((batch_size, 1, 1))
         # init new query objects all to zeros
         query_objects_zeros = torch.zeros_like(query_reshaped)
-        
-        # query_objects out shape=(num_decoder_layers, b, num_queries, num_classes)
-        # decoder_attn_weights out shape=(num_decoder_layers, b, num_queries, seq_len)
+
+        """
+            -----> ZERO QEMB INPUT TENSOR: (B, qemb=25, d_model=256)
+            -----> INPUT ENC TENSOR:       (B, seq_len=400, d_model=256)
+            -----> INPUT QEMB TENSOR:      (B, qemb=25, d_model=256)
+            -----> INPUT POS TENSOR:       (seq_len=400, d_model=256)
+            
+            -----> OUTPUT QUERY TENSOR: (layers=4, B, qemb=25, cls=21)
+            -----> OUTPUT ATTN TENSOR:  (layers=4, B, qemb=25, seq_len=400)
+        """
+        # query_objects out shape=
+        # decoder_attn_weights out shape=
         query_objects, decoder_attn_weights = self.decoder(query_objects_zeros, enc_output, query_reshaped, spatial_pos_embed)
 
         # shape=(num_decoder_layers, b, num_queries, num_classes)
