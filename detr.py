@@ -472,12 +472,6 @@ class TransformerDecoder(nn.Module):
         return decoder_outputs, decoder_cross_attn_weights
 
 
-
-
-
-
-
-
 class DETR(nn.Module):
     r"""
     DETR MODEL DIMENSIONS:
@@ -712,8 +706,6 @@ class DETR(nn.Module):
         bbox_output = self.bbox_mlp(query_objects).sigmoid()
 
         return (cls_output, bbox_output)
-
-
 
 
 # TESTING
