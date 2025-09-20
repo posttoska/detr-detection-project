@@ -87,7 +87,7 @@ def get_spatial_position_embeddings(embed_size: int, conv_out_tensor: torch.Tens
     # output shape=(seq_len=400, d_model=256)
     pos_embeded = torch.cat([grid_h_emb, grid_w_emb], dim=-1)
 
-    return pos_embeded, None
+    return pos_embeded
 
 
 class MultiHeadAttention(nn.Module):
@@ -174,7 +174,15 @@ class MultiHeadAttention(nn.Module):
                 -----> OUTPUT TENSOR: (B, h_num=8, qemb=25, d_head=32)
         """
         out = qk @ v
-        # get attention map shape=(b, seq_len, seq_len)
+
+        """
+            SELF ATTN CASE:
+                -----> INPUT ATTN MAP TENSOR:   (B, h_num=8, seq_len=400, seq_len=400)
+                -----> OUTPUT ATTN MAP TENSOR:  (B, seq_len=400, seq_len=400)
+            CROSS ATTN CASE:
+                -----> INPUT OUT TENSOR:  (B, h_num=8, qemb=25, seq_len=400)
+                -----> OUTPUT TENSOR:     (B, qemb=25, seq_len=400)
+        """
         att_map = qk.mean(dim=1)
 
         """
@@ -200,6 +208,14 @@ class MultiHeadAttention(nn.Module):
         # (b, seq_len, d_model)
         out = self.out_proj(out)
 
+        """
+            SELF ATTN CASE:
+                -----> OUTPUT ATTN TENSOR:       (B, seq_len=400, d_model=256)
+                -----> OUTPUT ATTN MAP TENSOR:   (B, seq_len=400, seq_len=400)
+            CROSS ATTN CASE:
+                -----> OUTPUT ATTN TENSOR:       (B, qemb=25, d_model=256)
+                -----> OUTPUT ATTN MAP TENSOR:   (B, qemb=25, seq_len=400)
+        """
         return out, att_map
 
 
@@ -240,10 +256,10 @@ class TransformerEncoder(nn.Module):
         self.ff_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(num_layers)])
 
         # dropout for self attention for all encoder layers
-        self.attn_dropouts = nn.Module(nn.Dropout(self.dropout_prob) for _ in range(num_layers))
+        self.attn_dropouts = nn.ModuleList([nn.Dropout(self.dropout_prob) for _ in range(num_layers)])
         
         # dropout for feed forward for all encoder layers
-        self.ff_dropouts = nn.Module(nn.Dropout(self.dropout_prob for _ in range(num_layers)))
+        self.ff_dropouts = nn.ModuleList([nn.Dropout(self.dropout_prob) for _ in range(num_layers)])
 
         # norm for encoder output for all encoder outputs
         self.output_norm = nn.LayerNorm(d_model)
@@ -296,9 +312,13 @@ class TransformerEncoder(nn.Module):
             # residual connection MLP
             out += out_ff
 
-            # output norn
-            out = self.output_norm(out)
-            return out, torch.stack(attn_weight)
+        # output norn
+        out = self.output_norm(out)
+        """
+            -----> OUTPUT ENC TENSOR: (B, seq_len=400, d_model=256)
+            -----> OUTPUT ATTN MAP TENSOR: (layers=4, B, seq_len=400, seq_len=400)
+        """
+        return out, torch.stack(attn_weights)
 
 
 class TransformerDecoder(nn.Module):
@@ -347,13 +367,13 @@ class TransformerDecoder(nn.Module):
         self.ff_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(num_layers)])
 
         # dropout for self attention for all decoder layers
-        self.attn_dropouts = nn.Module(nn.Dropout(self.dropout_prob) for _ in range(num_layers))
+        self.attn_dropouts = nn.ModuleList(nn.Dropout(self.dropout_prob) for _ in range(num_layers))
         
         # dropout for cross attention for all decoder layers
-        self.cross_attn_dropouts = nn.Module(nn.Dropout(self.dropout_prob) for _ in range(num_layers))
+        self.cross_attn_dropouts = nn.ModuleList(nn.Dropout(self.dropout_prob) for _ in range(num_layers))
         
         # dropout for feed forward for all decoder layers
-        self.ff_dropouts = nn.Module(nn.Dropout(self.dropout_prob for _ in range(num_layers)))
+        self.ff_dropouts = nn.ModuleList([nn.Dropout(self.dropout_prob) for _ in range(num_layers)])
 
         # norm for decoder output for all decoder outputs
         self.output_norm = nn.LayerNorm(d_model)
@@ -383,7 +403,7 @@ class TransformerDecoder(nn.Module):
             v = in_attn
 
             """
-                 -----> INPUT Q, K, V TENSORS: (B, qemb=25, d_model=256) 
+                 -----> INPUT Q, K, V TENSORS: (B, qemb=25, d_model=256)
                  -----> OUTPUT TENSOR:         (B, qemb=25, d_model=256)
             """
             out_attn, _ = self.attns[i](q=q, k=k, v=v)
@@ -403,14 +423,53 @@ class TransformerDecoder(nn.Module):
             # k shape=(b, seq_len=400, d_model=256)
             # v shape=(b, seq_len=400, d_model=256)
             """
-                 -----> Q TENSOR:     (B, qemb=25, d_model=256) 
-                 -----> K, V TENSORS: (B, seq_len=400, d_model=256) 
+                 -----> Q TENSOR:     (B, qemb=25, d_model=256)
+                 -----> K, V TENSORS: (B, seq_len=400, d_model=256)
             """
             q = in_attn + query_embed
             k = encoder_output + spatial_pos_embed
             v = encoder_output
 
-            out_attn, decoder_cross_attn = self.cross_attns[i]()(q=q, k=k, v=v)
+            """
+                 -----> INPUT Q TENSOR:                    (B, qemb=25, d_model=256)
+                 -----> INPUT K, V TENSORS:                (B, seq_len=400, d_model=256)
+                 -----> OUTPUT DCR TENSOR:                 (B, qemb=25, d_model=256)
+                 -----> OUTPUT CROSS ATTN MAP TENSOR:      (B, qemb=25, seq_len=400)
+            """
+            out_attn, decoder_cross_attn = self.cross_attns[i](q=q, k=k, v=v)
+
+            decoder_cross_attn_weights.append(decoder_cross_attn)
+            out_attn = self.cross_attn_dropouts[i](out_attn)
+
+            out += out_attn
+
+            # norm MLP
+            in_ff = self.ff_norms[i](out)
+
+            """
+                 -----> INPUT Q, K, V TENSORS: (B, qemb=25, d_model=256)
+                 -----> OUTPUT TENSOR:         (B, qemb=25, d_model=256)
+            """
+            out_ff = self.ffs[i](in_ff)
+
+            # dropout MLP
+            out_ff = self.ff_dropouts[i](out_ff)
+
+            # residual connection MLP
+            out += out_ff
+
+            # append
+            decoder_outputs.append(self.output_norm(out))
+
+        """
+             -----> INPUT DCR TENSOR:                  (B, qemb=25, d_model=256) 
+             -----> OUTPUT STACKED DCR TENSOR:         (layers=4, B, qemb=25, d_model=256)
+             -----> INPUT CROSS ATTN TENSOR:           (B, qemb=25, d_model=256) 
+             -----> OUTPUT STACKED CROSS ATTN TENSOR:  (layers=4, B, qemb=25, seq_len=400)
+        """
+        decoder_outputs = torch.stack(decoder_outputs)
+        decoder_cross_attn_weights = torch.stack(decoder_cross_attn_weights)
+        return decoder_outputs, decoder_cross_attn_weights
 
 
 
@@ -635,16 +694,68 @@ class DETR(nn.Module):
             -----> INPUT QEMB TENSOR:      (B, qemb=25, d_model=256)
             -----> INPUT POS TENSOR:       (seq_len=400, d_model=256)
             
-            -----> OUTPUT QUERY TENSOR: (layers=4, B, qemb=25, cls=21)
-            -----> OUTPUT ATTN TENSOR:  (layers=4, B, qemb=25, seq_len=400)
+            -----> OUTPUT QUERY TENSOR:       (layers=4, B, qemb=25, d_model=256)
+            -----> OUTPUT CROSS ATTN TENSOR:  (layers=4, B, qemb=25, seq_len=400)
         """
-        # query_objects out shape=
-        # decoder_attn_weights out shape=
         query_objects, decoder_attn_weights = self.decoder(query_objects_zeros, enc_output, query_reshaped, spatial_pos_embed)
 
-        # shape=(num_decoder_layers, b, num_queries, num_classes)
+        """
+            -----> INPUT QUERY TENSOR:  (layers=4, B, qemb=25, d_model=256)
+            -----> OUTPUT CLASS TENSOR: (layers=4, B, qemb=25, cls=21)
+        """
         cls_output = self.class_mlp(query_objects)
 
-        # shape=(num_decoder_layers, b, num_queries, coord=4)
+        """
+            -----> INPUT QUERY TENSOR:  (layers=4, B, qemb=25, d_model=256)
+            -----> OUTPUT CLASS TENSOR: (layers=4, B, qemb=25, coord=4)
+        """
         bbox_output = self.bbox_mlp(query_objects).sigmoid()
-        
+
+        return (cls_output, bbox_output)
+
+
+
+
+# TESTING
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+config = {
+    'image_h': 640,
+    'image_w': 640,
+    'backbone_channels': 512,
+    'd_model': 256,
+    'num_queries': 25,
+    'encoder_layers': 4,
+    'decoder_layers': 4,
+    'encoder_attn_heads': 8,
+    'decoder_attn_heads': 8,
+    'ff_inner_dim': 2048,
+    'dropout_prob': 0.1,
+    'cls_cost_weight': 1.0,
+    'l1_cost_weight': 5.0,
+    'giou_cost_weight': 2.0,
+    'bg_class_weight': 0.1,
+    'nms_threshold': 0.5,
+    'freeze_backbone': False,
+}
+
+num_classes = 21
+bg_class_idx = num_classes - 1
+
+model = DETR(config, num_classes=num_classes, bg_class_idx=bg_class_idx).to(device)
+
+
+B = 2
+x = torch.randn(B, 3, 640, 640, device=device)
+
+with torch.no_grad():
+    cls_all, box_all = model(x)
+
+print(cls_all)
+print("   ")
+print("   ")
+print("   ")
+print("   ")
+print("   ")
+print(box_all)
