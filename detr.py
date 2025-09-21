@@ -705,49 +705,52 @@ class DETR(nn.Module):
         """
         bbox_output = self.bbox_mlp(query_objects).sigmoid()
 
-        return (cls_output, bbox_output)
+        losses = defaultdict(list)
+        detections = []
+        detr_output = {}
 
+        # TRAINING
+        if self.training:
+            num_decoder_layers = self.num_decoder_layers
 
-# TESTING
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            # perform mathing for each decoder layer
+            for decoder_idx in range(num_decoder_layers):
+                """
+                    -----> INPUT CLS IDX TENSOR:   (layers=4, B, qemb=25, cls=21)
+                    -----> OUTPUT CLS IDX TENSOR:  (B, qemb=25, cls=21)
+                """
+                cls_idx_output = cls_output[decoder_idx]
+                """
+                    -----> INPUT BBOX INX CLASS TENSOR:  (layers=4, B, qemb=25, coord=4)
+                    -----> OUTPUT BBOX INX CLASS TENSOR: (B, qemb=25, coord=4)
+                """
+                bbox_idx_output = bbox_output[decoder_idx]
 
+                with torch.no_grad():
+                    """
+                        -----> INPUT CLS PROB TENSOR:   (B, qemb=25, cls=21)
+                        -----> OUTPUT CLS PROB TENSOR:  (B_qemb=25*B, cls=21)
+                    """
+                    class_prob_tns = cls_idx_output.reshape((-1, self.num_classes))
+                    class_prob_tns = class_prob_tns.softmax(dim=-1)
 
-config = {
-    'image_h': 640,
-    'image_w': 640,
-    'backbone_channels': 512,
-    'd_model': 256,
-    'num_queries': 25,
-    'encoder_layers': 4,
-    'decoder_layers': 4,
-    'encoder_attn_heads': 8,
-    'decoder_attn_heads': 8,
-    'ff_inner_dim': 2048,
-    'dropout_prob': 0.1,
-    'cls_cost_weight': 1.0,
-    'l1_cost_weight': 5.0,
-    'giou_cost_weight': 2.0,
-    'bg_class_weight': 0.1,
-    'nms_threshold': 0.5,
-    'freeze_backbone': False,
-}
+                    """
+                        -----> INPUT BBOX PROB TENSOR:  (B, qemb=25, coord=4)
+                        -----> OUTPUT BBOX PROB TENSOR: (B_qemb=25*B, coord=4)
+                    """
+                    pred_boxes_tns = bbox_idx_output.reshape((-1, 4))
 
-num_classes = 21
-bg_class_idx = num_classes - 1
+                    """
+                        BTO - batch target objects
+                        -----> BATCH TARGETS:  (BTO)
+                        -----> BATCH BBOXES:   (BTO, 4)
+                    """
+                    target_labels = torch.cat([target["labels"] for target in targets])
+                    target_boxes = torch.cat([target["boxes"] for target in targets])
 
-model = DETR(config, num_classes=num_classes, bg_class_idx=bg_class_idx).to(device)
+                    """
+                        -----> INPUT CLS PROB TENSOR:           (B_qemb=25*B, cls=21)
+                        -----> output CLS COST REDUCED TENSOR:  (B_qemb=25*B, BTO)
+                    """
+                    COST_CLS_REDUCED_TNS = -class_prob_tns[:, target_labels]
 
-
-B = 2
-x = torch.randn(B, 3, 640, 640, device=device)
-
-with torch.no_grad():
-    cls_all, box_all = model(x)
-
-print(cls_all)
-print("   ")
-print("   ")
-print("   ")
-print("   ")
-print("   ")
-print(box_all)
