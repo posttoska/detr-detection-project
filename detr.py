@@ -735,6 +735,7 @@ class DETR(nn.Module):
                     class_prob_tns = class_prob_tns.softmax(dim=-1)
 
                     """
+                        TNS - tensor
                         -----> INPUT BBOX PROB TENSOR:  (B, qemb=25, coord=4)
                         -----> OUTPUT BBOX PROB TENSOR: (B_qemb=25*B, coord=4)
                     """
@@ -754,3 +755,78 @@ class DETR(nn.Module):
                     """
                     COST_CLS_REDUCED_TNS = -class_prob_tns[:, target_labels]
 
+                    # DETR predicts cx,cy,w,h , we need to covert to x1y1x2y2 for giou
+                    # don't need to convert targets as they are already in x1y1x2y2
+                    pred_boxes_x1y1x2y2 = torchvision.ops.box_convert(pred_boxes_tns, 'cxcywh', 'xyxy')
+
+                    """
+                        -----> INPUT BBOX TENSOR:     (B_qemb=25*B, coord=4)
+                        -----> OUTPUT L1 COST TENSOR: (B_qemb=25*B, BTO)
+                    """
+                    COST_L1_REDUCED_TNS = torch.cdist(pred_boxes_x1y1x2y2, target_boxes, p=1)
+
+                    """
+                        -----> INPUT BBOX  TENSOR:      (B_qemb=25*B, coord=4)
+                        -----> OUTPUT GIOU COST TENSOR: (B_qemb=25*B, BTO)
+                    """
+                    COST_GIOU_REDUCED_TNS = -torchvision.ops.generalized_box_iou(pred_boxes_x1y1x2y2, target_boxes)
+
+                    """
+                        -----> INPUT sum(CLS COST, L1 COST, GIOU COST) TENSORS: (B_qemb=25*B, BTO)
+                        -----> OUTPUT COST TENSOR:                              (B_qemb=25*B, BTO)
+                    """
+                    COST_TNS = (self.cls_cost_weight * COST_CLS_REDUCED_TNS + self.l1_cost_weight * COST_L1_REDUCED_TNS + self.giou_cost_weight * COST_GIOU_REDUCED_TNS)
+
+                    """
+                       -----> INPUT COST TENSOR:  (B_qemb=25*B, BTO)
+                       -----> OUTPUT COST TENSOR: (B, qemb=25, BTO)
+                    """
+                    COST_TNS = COST_TNS.reshape(batch_size, self.num_queries, -1).cpu()
+
+                    # [2, 1] for B=2 (2 and 1 are target object on each image)
+                    num_targets_per_image = [len(target["labels"]) for target in targets]
+
+                    """
+                    ITO - image target objects;
+                       -----> INPUT COST TENSOR:       (B, qemb=25, BTO)
+                       -----> OUTPUT COST TENSOR SET:  {IMG=B, (B, qemb=25, ITO)}
+                       where ITO can vary across IMG
+                    """
+                    ITO_COST_TUPLE =  COST_TNS.split(num_targets_per_image, dim=-1)
+
+                    match_indices = []
+                    for batch_idx in range(batch_size):
+                        """
+                        DCT - output diagonal cost tensor,
+                        ITO - image target objects
+                           -----> INPUT COST TENSOR SET:          {IMG=B, (B, qemb=25, ITO)}
+                           -----> OUTPUT DIAGONAL COST TENSOR:    (B, qemb=25, ITO)
+                           where ITO is local value and can vary
+                        """
+                        DCT = ITO_COST_TUPLE[batch_idx][batch_idx]
+
+                        """
+                        GT - ground truth (objects),
+                        PO - predicted objects
+                        2 is prediction and label
+                            -----> INPUT DIAGONAL COST TENSOR:    (qemb=25, ITO)
+                            -----> OUTPUT LIN ASM TUPLE:          (2, GT=PO)
+                        """
+                        batch_idx_assignments = linear_sum_assignment(DCT)
+                        batch_idx_pred, batch_idx_target = batch_idx_assignments
+
+                        """
+                            GT - ground truth (objects),
+                            PO - predicted objects
+                            2 is prediction and label
+                                -----> INPUT LIN ASM TUPLE:         (qemb=25, ITO)
+                                -----> OUTPUT MATCH INDICES SET:    {B=IMG (2, GT=PO)}
+                                where GT=PO can is local value and can vary
+                        """
+                        match_indices.append((torch.as_tensor(batch_idx_pred, dtype=torch.int64), torch.as_tensor(batch_idx_target, dtype=torch.int64)))
+
+                    """
+                        BTO - batch target objects
+                        -----> INPUT MATCH INDICES SET:             {B=IMG (2, GT=PO)}
+                        -----> OUTPUT PREDICTION INDICES TENSOR:    (BTO)
+                    """
