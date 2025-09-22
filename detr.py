@@ -827,6 +827,14 @@ class DETR(nn.Module):
 
                     """
                         BTO - batch target objects
-                        -----> INPUT MATCH INDICES SET:             {B=IMG (2, GT=PO)}
-                        -----> OUTPUT PREDICTION INDICES TENSOR:    (BTO)
+                        -----> INPUT MATCH INDICES SET:      {B=IMG (2, GT=PO)}
+                        -----> OUTPUT BATCH INDICES TENSOR:  (BTO)
                     """
+                    pred_batch_idxs = torch.cat([torch.ones_like(pred_idx) * i for i, (pred_idx, _) in enumerate(match_indices)])
+
+                    """
+                        BTO - batch target objects
+                        -----> INPUT MATCH INDICES SET:      {B=IMG (2, GT=PO)}
+                        -----> OUTPUT QUERY INDICES TENSOR:  (BTO)
+                    """
+                    pred_query_idx = torch.cat([pred_idx for (pred_idx, _) in match_indices])
