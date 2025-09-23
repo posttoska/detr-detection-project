@@ -1039,4 +1039,4 @@ class DETR(nn.Module):
                 detr_output['detections'] = detections
                 detr_output['enc_attn'] = enc_att_weights
                 detr_output['dec_attn'] = decoder_attn_weights
-            return detr_output
+        return detr_output
