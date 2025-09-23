@@ -716,42 +716,42 @@ class DETR(nn.Module):
             # perform mathing for each decoder layer
             for decoder_idx in range(num_decoder_layers):
                 """
-                    -----> INPUT CLS IDX TENSOR:   (layers=4, B, qemb=25, cls=21)
-                    -----> OUTPUT CLS IDX TENSOR:  (B, qemb=25, cls=21)
+                    -----> INPUT CLS IDX TENSOR:        (layers=4, B, qemb=25, cls=21)
+                    -----> OUTPUT CLS IDX TENSOR:       (B, qemb=25, cls=21)
                 """
                 cls_idx_output = cls_output[decoder_idx]
                 """
-                    -----> INPUT BBOX INX CLASS TENSOR:  (layers=4, B, qemb=25, coord=4)
-                    -----> OUTPUT BBOX INX CLASS TENSOR: (B, qemb=25, coord=4)
+                    -----> INPUT BBOX INX CLASS TENSOR:     (layers=4, B, qemb=25, coord=4)
+                    -----> OUTPUT BBOX INX CLASS TENSOR:    (B, qemb=25, coord=4)
                 """
                 bbox_idx_output = bbox_output[decoder_idx]
 
                 with torch.no_grad():
                     """
-                        -----> INPUT CLS PROB TENSOR:   (B, qemb=25, cls=21)
-                        -----> OUTPUT CLS PROB TENSOR:  (B_qemb=25*B, cls=21)
+                        -----> INPUT CLS PROB TENSOR:       (B, qemb=25, cls=21)
+                        -----> OUTPUT CLS PROB TENSOR:      (B_qemb=25*B, cls=21)
                     """
                     class_prob_tns = cls_idx_output.reshape((-1, self.num_classes))
                     class_prob_tns = class_prob_tns.softmax(dim=-1)
 
                     """
                         TNS - tensor
-                        -----> INPUT BBOX PROB TENSOR:  (B, qemb=25, coord=4)
-                        -----> OUTPUT BBOX PROB TENSOR: (B_qemb=25*B, coord=4)
+                        -----> INPUT BBOX PROB TENSOR:      (B, qemb=25, coord=4)
+                        -----> OUTPUT BBOX PROB TENSOR:     (B_qemb=25*B, coord=4)
                     """
                     pred_boxes_tns = bbox_idx_output.reshape((-1, 4))
 
                     """
                         BTO - batch target objects
-                        -----> BATCH TARGETS:  (BTO)
-                        -----> BATCH BBOXES:   (BTO, 4)
+                        -----> OUTPUT BATCH TARGETS:       (BTO)
+                        -----> OUTPUT BATCH BBOXES:        (BTO, 4)
                     """
                     target_labels = torch.cat([target["labels"] for target in targets])
                     target_boxes = torch.cat([target["boxes"] for target in targets])
 
                     """
-                        -----> INPUT CLS PROB TENSOR:           (B_qemb=25*B, cls=21)
-                        -----> output CLS COST REDUCED TENSOR:  (B_qemb=25*B, BTO)
+                        -----> INPUT CLS PROB TENSOR:               (B_qemb=25*B, cls=21)
+                        -----> output CLS COST REDUCED TENSOR:      (B_qemb=25*B, BTO)
                     """
                     COST_CLS_REDUCED_TNS = -class_prob_tns[:, target_labels]
 
@@ -760,26 +760,26 @@ class DETR(nn.Module):
                     pred_boxes_x1y1x2y2 = torchvision.ops.box_convert(pred_boxes_tns, 'cxcywh', 'xyxy')
 
                     """
-                        -----> INPUT BBOX TENSOR:     (B_qemb=25*B, coord=4)
-                        -----> OUTPUT L1 COST TENSOR: (B_qemb=25*B, BTO)
+                        -----> INPUT BBOX TENSOR:       (B_qemb=25*B, coord=4)
+                        -----> OUTPUT L1 COST TENSOR:   (B_qemb=25*B, BTO)
                     """
                     COST_L1_REDUCED_TNS = torch.cdist(pred_boxes_x1y1x2y2, target_boxes, p=1)
 
                     """
-                        -----> INPUT BBOX  TENSOR:      (B_qemb=25*B, coord=4)
-                        -----> OUTPUT GIOU COST TENSOR: (B_qemb=25*B, BTO)
+                        -----> INPUT BBOX  TENSOR:          (B_qemb=25*B, coord=4)
+                        -----> OUTPUT GIOU COST TENSOR:     (B_qemb=25*B, BTO)
                     """
                     COST_GIOU_REDUCED_TNS = -torchvision.ops.generalized_box_iou(pred_boxes_x1y1x2y2, target_boxes)
 
                     """
-                        -----> INPUT sum(CLS COST, L1 COST, GIOU COST) TENSORS: (B_qemb=25*B, BTO)
-                        -----> OUTPUT COST TENSOR:                              (B_qemb=25*B, BTO)
+                        -----> INPUT sum(CLS COST, L1 COST, GIOU COST) TENSORS:     (B_qemb=25*B, BTO)
+                        -----> OUTPUT COST TENSOR:                                  (B_qemb=25*B, BTO)
                     """
                     COST_TNS = (self.cls_cost_weight * COST_CLS_REDUCED_TNS + self.l1_cost_weight * COST_L1_REDUCED_TNS + self.giou_cost_weight * COST_GIOU_REDUCED_TNS)
 
                     """
-                       -----> INPUT COST TENSOR:  (B_qemb=25*B, BTO)
-                       -----> OUTPUT COST TENSOR: (B, qemb=25, BTO)
+                       -----> INPUT COST TENSOR:    (B_qemb=25*B, BTO)
+                       -----> OUTPUT COST TENSOR:   (B, qemb=25, BTO)
                     """
                     COST_TNS = COST_TNS.reshape(batch_size, self.num_queries, -1).cpu()
 
@@ -790,7 +790,7 @@ class DETR(nn.Module):
                     ITO - image target objects;
                        -----> INPUT COST TENSOR:       (B, qemb=25, BTO)
                        -----> OUTPUT COST TENSOR SET:  {IMG=B, (B, qemb=25, ITO)}
-                       where ITO can vary across IMG
+                       where ITO can vary per IMG (batch)
                     """
                     ITO_COST_TUPLE =  COST_TNS.split(num_targets_per_image, dim=-1)
 
@@ -799,9 +799,9 @@ class DETR(nn.Module):
                         """
                         DCT - output diagonal cost tensor,
                         ITO - image target objects
-                           -----> INPUT COST TENSOR SET:          {IMG=B, (B, qemb=25, ITO)}
-                           -----> OUTPUT DIAGONAL COST TENSOR:    (B, qemb=25, ITO)
-                           where ITO is local value and can vary
+                           -----> INPUT COST TENSOR SET:           {IMG=B, (B, qemb=25, ITO)}
+                           -----> OUTPUT DIAGONAL COST TENSORS:    (qemb=25, ITO)
+                           where ITO is local value and can vary per tensor
                         """
                         DCT = ITO_COST_TUPLE[batch_idx][batch_idx]
 
@@ -819,22 +819,163 @@ class DETR(nn.Module):
                             GT - ground truth (objects),
                             PO - predicted objects
                             2 is prediction and label
-                                -----> INPUT LIN ASM TUPLE:         (qemb=25, ITO)
+                                -----> INPUT LIN ASM TUPLE:         (2, GT=PO)
                                 -----> OUTPUT MATCH INDICES SET:    {B=IMG (2, GT=PO)}
-                                where GT=PO can is local value and can vary
+                                where GT=PO can is local value and can vary per batch
                         """
                         match_indices.append((torch.as_tensor(batch_idx_pred, dtype=torch.int64), torch.as_tensor(batch_idx_target, dtype=torch.int64)))
 
-                    """
-                        BTO - batch target objects
-                        -----> INPUT MATCH INDICES SET:      {B=IMG (2, GT=PO)}
-                        -----> OUTPUT BATCH INDICES TENSOR:  (BTO)
-                    """
-                    pred_batch_idxs = torch.cat([torch.ones_like(pred_idx) * i for i, (pred_idx, _) in enumerate(match_indices)])
+                """
+                    BTO - batch target objects
+                    -----> INPUT MATCH INDICES SET:      {B=IMG (2, GT=PO)}
+                    -----> OUTPUT BATCH INDICES TENSOR:  (BTO)
+                    where GT=PO can and can vary per batch
+                """
+                pred_batch_idxs = torch.cat([torch.ones_like(pred_idx) * i for i, (pred_idx, _) in enumerate(match_indices)])
 
-                    """
-                        BTO - batch target objects
-                        -----> INPUT MATCH INDICES SET:      {B=IMG (2, GT=PO)}
-                        -----> OUTPUT QUERY INDICES TENSOR:  (BTO)
-                    """
-                    pred_query_idx = torch.cat([pred_idx for (pred_idx, _) in match_indices])
+                """
+                    -----> INPUT MATCH INDICES SET:      {B=IMG (2, GT=PO)}
+                    -----> OUTPUT QUERY INDICES TENSOR:  (BTO)
+                    where GT=PO can and can vary per batch
+                """
+                pred_query_idx = torch.cat([pred_idx for (pred_idx, _) in match_indices])
+
+                """
+                    -----> INPUT MATCH INDICES SET:      {B=IMG (2, GT=PO)}
+                    -----> INPUT TARGETS SET:            {B=IMG (2, GT=PO)}
+                    -----> OUTPUT VALID TARGETS TENSOR:  (BTO)
+                    where GT can and can vary per batch
+                """
+                valid_obj_target_cls = torch.cat([target["labels"][target_obj_idx] for target, (_, target_obj_idx) in zip(targets, match_indices)
+                ])
+
+                """
+                    -----> INPUT CLS IDX TENSOR:            (B, qemb=25, cls=21)
+                    -----> OUTPUT TARGET CLASSES TENSOR:    (B, qemb=25)
+                """
+                target_classes = torch.full(cls_idx_output.shape[:2], fill_value=self.bg_class_idx, dtype=torch.int64,device=cls_idx_output.device)
+
+
+                """
+                    -----> INPUT TARGET CLASSES TENSOR:     (B, qemb=25)
+                    -----> INPUT BATCH INDICES TENSOR:      (BTO)
+                    -----> INPUT QUERY INDICES TENSOR:      (BTO)
+                    -----> INPUT VALID TARGETS TENSOR:      (BTO)
+                    
+                    -----> OUTPUT TARGET CLASSES TENSOR:    (B, qemb=25)
+                """
+                target_classes[(pred_batch_idxs, pred_query_idx)] = valid_obj_target_cls
+
+
+                cls_weights = torch.ones(self.num_classes)
+                """
+                    -----> INPUT CLASS WEIGHTS TENSOR:      (cls=21)
+                    -----> OUTPUT CLASS WEIGHTS TENSOR:     (cls=21)
+                """
+                cls_weights[self.bg_class_idx] = self.bg_cls_weight
+
+                """
+                    -----> INPUT TARGET CLASSES TENSOR:     (B, qemb=25)            -----> RESHAPED TARGET CLASSES TENSOR:      (B_qemb=25*B)
+                    -----> INPUT CLS IDX TENSOR:            (B, qemb=25, cls=21)    -----> RESHAPED CLS IDX TENSOR:             (B_qemb=25*B, cls=21)
+                    -----> INPUT CLASS WEIGHTS TENSOR:      (cls=21)
+                    -----> OUTPUT LOSS SCALAR FOR CLASS     ()
+                """
+                loss_cls = torch.nn.functional.cross_entropy(cls_idx_output.reshape(-1, self.num_classes), target_classes.reshape(-1), cls_weights.to(cls_idx_output.device))
+
+                """
+                    -----> INPUT BATCH INDICES TENSOR:                  (BTO)
+                    -----> INPUT QUERY INDICES TENSOR:                  (BTO)
+                    -----> INPUT BBOX INX CLASS TENSOR:                 (B, qemb=25, coord=4)
+                    -----> OUTPUT MATCHED (REDUCED) PRED BBOXES         (BTO, coord=4)
+                """
+                matched_pred_boxes = bbox_idx_output[pred_batch_idxs, pred_query_idx]
+
+                """
+                    -----> INPUT TARGETS SET (take "2" to get 'boxes'):         {B=IMG (2='classes'&'boxes', GT=PO)}
+                    -----> INPUT MATCH INDICES SET:                             {B=IMG (2='target'&'predicted', GT=PO)}
+                    -----> OUTPUT TARGET BOXES TENSOR:                          (BTO, coord=4)
+                    where GT=PO can and can vary per batch
+                """
+                target_boxes = torch.cat([
+                    target['boxes'][target_obj_idx]
+                    for target, (_, target_obj_idx) in zip(targets, match_indices)],
+                    dim=0
+                )
+
+                # Convert matched pred boxes to x1y1x2y2 format
+                """
+                    -----> INPUT MATCHED (REDUCED) PRED BBOXES          (BTO, coord=4)
+                    -----> OUTPUT MATCHED (REDUCED) PRED BBOXES         (BTO, coord=4)
+                """
+                matched_pred_boxes_x1y1x2y2 = torchvision.ops.box_convert(matched_pred_boxes,'cxcywh','xyxy')
+
+                # Don't need to convert target boxes as they are in x1y1x2y2 format
+                # Compute L1 Localization loss
+
+                """
+                    -----> INPUT MATCHED (REDUCED) PRED BBOXES          (BTO, coord=4)
+                    -----> OUTPUT TARGET BOXES TENSOR:                  (BTO, coord=4)
+                    -----> OUTPUT BBOX LOSS SCALAR:                     ()
+                """
+                loss_bbox = torch.nn.functional.l1_loss(matched_pred_boxes_x1y1x2y2, target_boxes, reduction='none')
+                # norm
+                loss_bbox = loss_bbox.sum() / matched_pred_boxes.shape[0]
+
+                """
+                    -----> INPUT MATCHED (REDUCED) PRED BBOXES          (BTO, coord=4)
+                    -----> OUTPUT TARGET BOXES TENSOR:                  (BTO, coord=4)
+                    -----> OUTPUT BBOX LOSS SCALAR:                     ()
+                """
+                loss_giou = torchvision.ops.generalized_box_iou_loss(matched_pred_boxes_x1y1x2y2, target_boxes)
+                # norm
+                loss_giou = loss_giou.sum() / matched_pred_boxes.shape[0]
+
+                # losses
+                losses['classification'].append(loss_cls * self.cls_cost_weight)
+                losses['bbox_regression'].append(loss_bbox * self.l1_cost_weight + loss_giou * self.giou_cost_weight)
+
+            detr_output['loss'] = losses
+
+        else:
+            # for inference we are only interested in last layer outputs
+
+            """
+                -----> INPUT CLS IDX TENSOR:        (layers=4, B, qemb=25, cls=21)
+                -----> OUTPUT CLS IDX TENSOR:       (B, qemb=25, cls=21)
+            """
+            cls_output = cls_output[-1]
+
+            """
+                -----> INPUT BBOX INX CLASS TENSOR:     (layers=4, B, qemb=25, coord=4)
+                -----> OUTPUT BBOX INX CLASS TENSOR:    (B, qemb=25, coord=4)
+            """
+            bbox_output = bbox_output[-1]
+
+            """
+                -----> INPUT CLS IDX TENSOR:        (B, qemb=25, cls=21)
+                -----> OUTPUT CLS IDX TENSOR:       (B, qemb=25, cls=21)
+            """
+            prob = torch.nn.functional.softmax(cls_output, -1)
+
+            # get all query boxes and their best fg class as label
+
+            """
+                -----> INPUT CLS IDX TENSOR:        (B, qemb=25, cls=21)
+                -----> SCORES TENSOR:               (B, qemb)
+                -----> SCORES TENSOR:               (B, qemb)
+            """
+            if self.bg_class_idx == 0:
+                scores, labels = prob[..., 1:].max(-1)
+                labels = labels + 1
+            else:
+                scores, labels = prob[..., :-1].max(-1)
+
+            # convert to x1y1x2y2 format
+            """
+                -----> INPUT BBOX INX CLASS TENSOR:     (B, qemb=25, coord=4)
+                -----> OUTPUT BBOX INX CLASS TENSOR:    (B, qemb=25, coord=4)
+            """
+            boxes = torchvision.ops.box_convert(bbox_output,
+                                                'cxcywh',
+                                                'xyxy')
+
