@@ -1023,3 +1023,20 @@ class DETR(nn.Module):
                 # NMS filtering
                 if use_nms:
                     keep_idxs = torchvision.ops.batched_nms(boxes_idx, scores_idx, labels_idx, iou_threshold=self.nms_threshold)
+
+                    scores_idx = scores_idx[keep_idxs]
+                    boxes_idx = boxes_idx[keep_idxs]
+                    labels_idx = labels_idx[keep_idxs]
+                detections.append(
+                    {
+                        "boxes": boxes_idx,
+                        "scores": scores_idx,
+                        "labels": labels_idx
+                        ,
+                    }
+                )
+
+                detr_output['detections'] = detections
+                detr_output['enc_attn'] = enc_att_weights
+                detr_output['dec_attn'] = decoder_attn_weights
+            return detr_output
