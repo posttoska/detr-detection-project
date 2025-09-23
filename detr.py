@@ -960,9 +960,9 @@ class DETR(nn.Module):
             # get all query boxes and their best fg class as label
 
             """
-                -----> INPUT CLS IDX TENSOR:        (B, qemb=25, cls=21)
-                -----> SCORES TENSOR:               (B, qemb)
-                -----> SCORES TENSOR:               (B, qemb)
+                -----> INPUT CLS IDX TENSOR:                (B, qemb=25, cls=21)
+                -----> OUTPUT SCORES TENSOR:                (B, qemb)
+                -----> OUTPUT LABELS TENSOR:                (B, qemb)
             """
             if self.bg_class_idx == 0:
                 scores, labels = prob[..., 1:].max(-1)
@@ -975,7 +975,51 @@ class DETR(nn.Module):
                 -----> INPUT BBOX INX CLASS TENSOR:     (B, qemb=25, coord=4)
                 -----> OUTPUT BBOX INX CLASS TENSOR:    (B, qemb=25, coord=4)
             """
-            boxes = torchvision.ops.box_convert(bbox_output,
-                                                'cxcywh',
-                                                'xyxy')
+            boxes = torchvision.ops.box_convert(bbox_output,'cxcywh','xyxy')
 
+            for batch_idx in range(boxes.shape[0]):
+                """
+                    -----> INPUT SCORES TENSOR:                     (B, qemb)
+                    -----> INPUT SCORES INX TENSOR:                 (qemb)
+                """
+                scores_idx = scores[batch_idx]
+
+                """
+                    -----> INPUT LABELS TENSOR:                     (B, qemb)
+                    -----> INPUT SCORES INDEX TENSOR:               (qemb)
+                """
+                labels_idx = labels[batch_idx]
+
+                """
+                    -----> INPUT BBOX INX CLASS TENSOR:     (B, qemb=25, coord=4)
+                    -----> OUTPUT BBOX INX CLASS TENSOR:     (qemb=25, coord=4)
+                """
+                boxes_idx = boxes[batch_idx]
+
+                """
+                    -----> INPUT SCORES INX TENSOR:                 (qemb)
+                    -----> OUTPUT KEEP INX TENSOR:                  (qemb)
+                """
+                keep_idxs = scores_idx >= score_thresh
+
+                """
+                    -----> INPUT SCORES TENSOR:                     (B, qemb)
+                    -----> OUTPUT SCORES INX TENSOR:                (qemb)
+                """
+                scores_idx = scores_idx[keep_idxs]
+
+                """
+                    -----> INPUT KEEP INX TENSOR:                   (qemb)
+                    -----> OUTPUT BBOX INX CLASS TENSOR:            (qkept, coord=4)
+                """
+                boxes_idx = boxes_idx[keep_idxs]
+
+                """
+                    -----> INPUT KEEP INX TENSOR:                   (qemb)
+                    -----> OUTPUT LABELS INX CLASS TENSOR:          (qkept)
+                """
+                labels_idx = labels_idx[keep_idxs]
+
+                # NMS filtering
+                if use_nms:
+                    keep_idxs = torchvision.ops.batched_nms(boxes_idx, scores_idx, labels_idx, iou_threshold=self.nms_threshold)
