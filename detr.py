@@ -783,7 +783,9 @@ class DETR(nn.Module):
                     """
                     COST_TNS = COST_TNS.reshape(batch_size, self.num_queries, -1).cpu()
 
-                    # [2, 1] for B=2 (2 and 1 are target object on each image)
+                    """
+                        -----> INPUT TARGETS SET (take "2" to get 'boxes'):         {B=IMG (2='classes'&'boxes', GT=PO)}
+                    """
                     num_targets_per_image = [len(target["labels"]) for target in targets]
 
                     """
@@ -1004,13 +1006,13 @@ class DETR(nn.Module):
 
                 """
                     -----> INPUT SCORES TENSOR:                     (B, qemb)
-                    -----> OUTPUT SCORES INX TENSOR:                (qemb)
+                    -----> OUTPUT SCORES INX TENSOR:                (qkept)
                 """
                 scores_idx = scores_idx[keep_idxs]
 
                 """
                     -----> INPUT KEEP INX TENSOR:                   (qemb)
-                    -----> OUTPUT BBOX INX CLASS TENSOR:            (qkept, coord=4)
+                    -----> OUTPUT BBOX INX TENSOR:                  (qkept, coord=4)
                 """
                 boxes_idx = boxes_idx[keep_idxs]
 
@@ -1022,11 +1024,35 @@ class DETR(nn.Module):
 
                 # NMS filtering
                 if use_nms:
+                    """
+                        -----> INPUT BBOX INX CLASS TENSOR:             (qkept, coord=4)
+                        -----> INPUT SCORES INX TENSOR:                 (qkept)
+                        -----> INPUT LABELS INX CLASS TENSOR:           (qkept)
+                        -----> OUTPUT KEEP INX TENSOR:                  (qnms)
+                    """
                     keep_idxs = torchvision.ops.batched_nms(boxes_idx, scores_idx, labels_idx, iou_threshold=self.nms_threshold)
 
+                    """
+                        -----> INPUT SCORES INX TENSOR:                 (qkept)
+                        -----> INPUT KEEP INX TENSOR:                   (qnms)
+                        -----> OUTPUT KEEP INX TENSOR:                  (qnms)
+                    """
                     scores_idx = scores_idx[keep_idxs]
+
+                    """
+                        -----> INPUT BBOX INX CLASS TENSOR:             (qkept, coord=4)
+                        -----> INPUT KEEP INX TENSOR:                   (qnms)
+                        -----> OUTPUT BBOX INX TENSOR:                  (qnms, coord=4)
+                    """
                     boxes_idx = boxes_idx[keep_idxs]
+
+                    """
+                        -----> INPUT LABELS INX CLASS TENSOR:           (qkept)
+                        -----> INPUT KEEP INX TENSOR:                   (qnms)
+                        -----> OUTPUT LABELS INX TENSOR:                (qnms)
+                    """
                     labels_idx = labels_idx[keep_idxs]
+
                 detections.append(
                     {
                         "boxes": boxes_idx,
@@ -1036,7 +1062,8 @@ class DETR(nn.Module):
                     }
                 )
 
-                detr_output['detections'] = detections
-                detr_output['enc_attn'] = enc_att_weights
-                detr_output['dec_attn'] = decoder_attn_weights
+            detr_output['detections'] = detections
+            detr_output['enc_attn'] = enc_att_weights
+            detr_output['dec_attn'] = decoder_attn_weights
+
         return detr_output
