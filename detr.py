@@ -96,7 +96,9 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
 
         self.num_heads = num_heads
-        self.in_proj = nn.Linear(d_model, d_model)
+        self.in_proj_q = nn.Linear(d_model, d_model)
+        self.in_proj_k = nn.Linear(d_model, d_model)
+        self.in_proj_v = nn.Linear(d_model, d_model)
         self.out_proj = nn.Linear(d_model, d_model)
         self.d_head = d_model // num_heads
     
@@ -115,11 +117,9 @@ class MultiHeadAttention(nn.Module):
         broadcast_shape_Q = (Qb, Ql, self.num_heads, self.d_head)
         broadcast_shape_K = (Kb, Kl, self.num_heads, self.d_head)
         broadcast_shape_V = (Vb, Vl, self.num_heads, self.d_head)
-
-        # linear proj layer
-        q = self.in_proj(q)
-        k = self.in_proj(k)
-        v = self.in_proj(v)
+        q = self.in_proj_q(q)
+        k = self.in_proj_k(k)
+        v = self.in_proj_v(v)
 
         """
             SELF ATTN CASE:
