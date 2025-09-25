@@ -649,7 +649,7 @@ class DETR(nn.Module):
 
         """
             -----> INPUT TENSOR:  (B, d_model=256, feat_h=20, feat_w=20)
-            -----> OUTPUT TENSOR: (seq_len=400, d_model=256)
+            -----> OUTPUT TENSOR: (B, seq_len=400, d_model=256)
         """
         batch_size, d_model, feat_h, feat_w = conv_out.shape
         spatial_pos_embed = get_spatial_position_embeddings(d_model, conv_out)
@@ -743,13 +743,16 @@ class DETR(nn.Module):
 
                     """
                         BTO - batch target objects
+                        -----> INPUT TARGETS               {B, (2, ITO)}
                         -----> OUTPUT BATCH TARGETS:       (BTO)
                         -----> OUTPUT BATCH BBOXES:        (BTO, 4)
+                        where ITO can vary
                     """
                     target_labels = torch.cat([target["labels"] for target in targets])
                     target_boxes = torch.cat([target["boxes"] for target in targets])
 
                     """
+                        
                         -----> INPUT CLS PROB TENSOR:               (B_qemb=25*B, cls=21)
                         -----> output CLS COST REDUCED TENSOR:      (B_qemb=25*B, BTO)
                     """
