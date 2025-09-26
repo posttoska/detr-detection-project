@@ -20,11 +20,15 @@ def load_images_and_anns(im_sets, label2idx, ann_fname, split):
     """
     im_infos = []
     for im_set in im_sets:
-        im_names = []
         # Fetch all image names in txt file for this imageset
-        for line in open(os.path.join(
-                im_set, 'ImageSets', 'Main', '{}.txt'.format(ann_fname))):
-            im_names.append(line.strip())
+        list_path = os.path.join(im_set, 'ImageSets', 'Main', f'{ann_fname}.txt')
+        if not os.path.isfile(list_path):
+            raise FileNotFoundError(
+                f"Expected list at {list_path}. "
+                f"`im_set` must be the VOC root that contains ImageSets/Main"
+            )
+        with open(list_path, 'r') as f:
+            im_names = [ln.strip() for ln in f if ln.strip()]
 
         # Set annotation and image path
         ann_dir = os.path.join(im_set, 'Annotations')

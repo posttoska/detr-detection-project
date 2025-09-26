@@ -327,12 +327,15 @@
 
     ├─ dataset
         ├─ voc.py
+        ├─ __init__.py
 
 
     ├─ model
         ├─ detr.py
+	├─ __init__.py
 
 
     ├─ tools
         ├─ infer.py
         ├─ train.py
+        ├─ __init__.py

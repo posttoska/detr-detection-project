@@ -1,12 +1,17 @@
 dataset_params:
-  train_im_sets: ['data/VOC2007', 'data/VOC2012']
-  test_im_sets: ['data/VOC2007-test']
+  train_im_sets:
+    - data/VOC2007/VOC2007_train_val/VOCdevkit/VOC2007
+    - data/VOC2012/VOC2012_train_val/VOCdevkit/VOC2012
+  test_im_sets:
+    - data/VOC2007/VOC2007_test/VOCdevkit/VOC2007
   num_classes : 21
   bg_class_idx : 0
   im_size : 640
 
 model_params:
   im_channels : 3
+  image_h: 640
+  image_w: 640
   backbone_channels : 512
   d_model : 256
   num_queries : 25

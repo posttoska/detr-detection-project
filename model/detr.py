@@ -140,11 +140,11 @@ class TransformerEncoder(nn.Module):
             attn_weights.append(attn_weight)
 
             out_attn = self.attn_dropouts[i](out_attn)
-            out += out_attn
+            out = out + out_attn
             in_ff = self.ff_norms[i](out)
             out_ff = self.ffs[i](in_ff)
             out_ff = self.ff_dropouts[i](out_ff)
-            out += out_ff
+            out = out + out_ff
 
         out = self.output_norm(out)
         return out, torch.stack(attn_weights)
@@ -201,7 +201,7 @@ class TransformerDecoder(nn.Module):
 
             out_attn, _ = self.attns[i](q=q, k=k, v=v)
             out_attn = self.attn_dropouts[i](out_attn)
-            out += out_attn
+            out = out + out_attn
             in_attn = self.cross_attn_norms[i](out)
 
             q = in_attn + query_embed
@@ -212,12 +212,12 @@ class TransformerDecoder(nn.Module):
 
             decoder_cross_attn_weights.append(decoder_cross_attn)
             out_attn = self.cross_attn_dropouts[i](out_attn)
-            out += out_attn
+            out = out + out_attn
 
             in_ff = self.ff_norms[i](out)
             out_ff = self.ffs[i](in_ff)
             out_ff = self.ff_dropouts[i](out_ff)
-            out += out_ff
+            out = out + out_ff
             decoder_outputs.append(self.output_norm(out))
 
         decoder_outputs = torch.stack(decoder_outputs)
