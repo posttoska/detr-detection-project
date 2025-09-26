@@ -51,8 +51,12 @@ def load_images_and_anns(im_sets, label2idx, ann_fname, split):
             detections = []
             for obj in ann_info.findall('object'):
                 det = {}
-                label = label2idx[obj.find('name').text]
-                difficult = int(obj.find('difficult').text)
+                name = obj.find('name').text
+                if name not in label2idx:
+                    raise KeyError(f"Unknown class in XML: {name}. Add it to class list.")
+                label = label2idx[name]
+                diff_tag = obj.find('difficult')
+                difficult = int(diff_tag.text) if diff_tag is not None else 0
                 bbox_info = obj.find('bndbox')
                 bbox = [
                     int(bbox_info.find('xmin').text) - 1,
@@ -114,14 +118,16 @@ class VOCDataset(Dataset):
             ]),
         }
 
-        classes = [
+        voc20 = [
             'person', 'bird', 'cat', 'cow', 'dog', 'horse', 'sheep',
             'aeroplane', 'bicycle', 'boat', 'bus', 'car', 'motorbike', 'train',
             'bottle', 'chair', 'diningtable', 'pottedplant', 'sofa', 'tvmonitor'
         ]
-        classes = sorted(classes)
+
+        extra = ['apple', 'cup']
+
         # We need to add background class as well with 0 index
-        classes = ['background'] + classes
+        classes = ['background'] + voc20 + extra
 
         self.label2idx = {classes[idx]: idx for idx in range(len(classes))}
         self.idx2label = {idx: classes[idx] for idx in range(len(classes))}
