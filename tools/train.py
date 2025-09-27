@@ -10,6 +10,7 @@ from model.detr import DETR
 from dataset.voc import VOCDataset
 from torch.utils.data.dataloader import DataLoader
 from torch.optim.lr_scheduler import MultiStepLR
+import time, csv
 
 # --- create Main/trainval.txt ONCE if it's missing ---
 root = Path(r"data/MYDATA2025/MYDATA2025_train_val/MYDATAdevkit/MYDATA2025")
@@ -70,6 +71,15 @@ def train(args):
     train_config = config['train_params']
     model_config = config['model_params']
 
+    # --- training log csv ---
+    log_dir = train_config['task_name']
+    os.makedirs(log_dir, exist_ok=True)
+    log_csv = os.path.join(log_dir, 'training_log.csv')
+    if not os.path.exists(log_csv):
+        with open(log_csv, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['epoch', 'cls_loss', 'loc_loss', 'total_loss', 'epoch_time_sec'])
+
     seed = train_config['seed']
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -126,12 +136,15 @@ def train(args):
     num_epochs = train_config['num_epochs']
     steps = 0
     for i in range(num_epochs):
+        epoch_start = time.time()
         detr_classification_losses = []
         detr_localization_losses = []
+
         for idx, (ims, targets, _) in enumerate(tqdm(train_dataset)):
             for target in targets:
                 target['boxes'] = target['boxes'].float().to(device)
                 target['labels'] = target['labels'].long().to(device)
+
             images = torch.stack([im.float().to(device) for im in ims], dim=0)
             batch_losses = model(images, targets)['loss']
 
@@ -140,33 +153,43 @@ def train(args):
 
             detr_classification_losses.append(sum(batch_losses['classification']).item())
             detr_localization_losses.append(sum(batch_losses['bbox_regression']).item())
+
             loss = loss / acc_steps
             loss.backward()
 
             if (idx + 1) % acc_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
+
             if steps % train_config['log_steps'] == 0:
                 loss_output = ''
                 loss_output += 'DETR Classification Loss : {:.4f}'.format(
-                    np.mean(detr_classification_losses))
+                    np.mean(detr_classification_losses) if detr_classification_losses else 0.0)
                 loss_output += ' | DETR Localization Loss : {:.4f}'.format(
-                    np.mean(detr_localization_losses))
+                    np.mean(detr_localization_losses) if detr_localization_losses else 0.0)
                 print(loss_output, lr_scheduler.get_last_lr())
+
             if torch.isnan(loss):
                 print('Loss is becoming nan. Exiting')
                 exit(0)
             steps += 1
+
         optimizer.step()
         optimizer.zero_grad()
         lr_scheduler.step()
-        print('Finished epoch {}'.format(i+1))
-        loss_output = ''
-        loss_output += 'DETR Classification Loss : {:.4f}'.format(
-            np.mean(detr_classification_losses))
-        loss_output += ' | DETR Localization Loss : {:.4f}'.format(
-            np.mean(detr_localization_losses))
-        print(loss_output)
+
+        # --- end-of-epoch logging ---
+        cls_mean = float(np.mean(detr_classification_losses)) if detr_classification_losses else 0.0
+        loc_mean = float(np.mean(detr_localization_losses)) if detr_localization_losses else 0.0
+        total_mean = cls_mean + loc_mean
+        epoch_time = time.time() - epoch_start
+
+        print(f'Finished epoch {i + 1} | cls={cls_mean:.4f} loc={loc_mean:.4f} '
+              f'total={total_mean:.4f} | time={epoch_time:.1f}s')
+
+        with open(log_csv, 'a', newline='') as f:
+            csv.writer(f).writerow([i + 1, cls_mean, loc_mean, total_mean, round(epoch_time, 4)])
+
         _save_latest_and_periodic(model, train_config, epoch_idx=i, num_epochs=num_epochs)
     print('Done Training...')
 
