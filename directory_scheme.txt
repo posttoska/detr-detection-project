@@ -367,7 +367,7 @@
                                 ├─ class_seen_in_this_my_test_dataset.txt
                                 ├─ class_seen_in_this_my_test_dataset.txt
                             ├─ Segmentation
-                                ├─ test.txt
+                                ├─ test.txt (empty)
                         ├─ JPEGImages
                             ├─ my_some_num_from_1_to_160.jpg
                             ├─ my_some_num_from_1_to_160.jpg
