@@ -5,10 +5,23 @@ import numpy as np
 import yaml
 import random
 from tqdm import tqdm
+from pathlib import Path
 from model.detr import DETR
 from dataset.voc import VOCDataset
 from torch.utils.data.dataloader import DataLoader
 from torch.optim.lr_scheduler import MultiStepLR
+
+# --- create Main/trainval.txt ONCE if it's missing ---
+root = Path(r"data/MYDATA2025/MYDATA2025_train_val/MYDATAdevkit/MYDATA2025")
+ann  = root / "Annotations"
+out  = root / "ImageSets" / "Main" / "trainval.txt"
+
+if not out.exists():  # <- only create if it's missing
+    ids = sorted(p.stem for p in ann.glob("*.xml"))
+    out.write_text("\n".join(ids) + "\n", encoding="utf-8")
+    print(f"[INFO] Wrote {len(ids)} IDs -> {out}")
+else:
+    print(f"[INFO] Using existing list: {out}")
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 if torch.backends.mps.is_available():
@@ -18,6 +31,30 @@ if torch.backends.mps.is_available():
 
 def collate_function(data):
     return tuple(zip(*data))
+
+# BACKUP EVERY 50 EPOCHS
+def _save_latest_and_periodic(model, train_config, epoch_idx, num_epochs):
+    """
+    Save the 'latest' checkpoint every epoch (original behavior),
+    and also save a periodic backup every `save_every_epochs` epochs
+    (and at the very last epoch).
+    """
+    # Save 'latest' in task folder
+    latest_path = os.path.join(train_config['task_name'], train_config['ckpt_name'])
+    torch.save(model.state_dict(), latest_path)
+
+    # Periodic backups
+    save_every = train_config.get('save_every_epochs', 50)  # configurable; defaults to 50
+    ep = epoch_idx + 1  # epoch number (1-based)
+    if (ep % save_every == 0) or (ep == num_epochs):
+        ckpt_dir = os.path.join(train_config['task_name'], 'checkpoints')
+        os.makedirs(ckpt_dir, exist_ok=True)
+        base, ext = os.path.splitext(train_config['ckpt_name'])
+        backup_name = f"{base}_ep{ep:03d}{ext}"
+        backup_path = os.path.join(ckpt_dir, backup_name)
+        torch.save(model.state_dict(), backup_path)
+        print(f"[CKPT] Saved periodic backup: {backup_path}")
+
 
 def train(args):
     # Read the config file #
@@ -130,8 +167,7 @@ def train(args):
         loss_output += ' | DETR Localization Loss : {:.4f}'.format(
             np.mean(detr_localization_losses))
         print(loss_output)
-        torch.save(model.state_dict(), os.path.join(train_config['task_name'],
-                                                         train_config['ckpt_name']))
+        _save_latest_and_periodic(model, train_config, epoch_idx=i, num_epochs=num_epochs)
     print('Done Training...')
 
 
