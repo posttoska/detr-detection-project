@@ -31,7 +31,6 @@ model_params:
   bg_class_weight : 0.1
   nms_threshold : 0.5
 
-
 train_params:
   task_name: 'voc'
   eval_score_threshold: 0.0

@@ -456,4 +456,10 @@
     ├─ tools
         ├─ infer.py
         ├─ train.py
-        ├─ __init__.py
+        ├─ __init__.py'
+
+
+    ├─ voc
+        ├─ checkpoints
+            ├─ detr_voc_somedata.pth
+        ├─ training_log.csv
